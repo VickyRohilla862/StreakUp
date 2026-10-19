@@ -1,5 +1,4 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
 import {
   Activity, AlarmClock, ArrowDownRight, ArrowRight, ArrowUpRight, Award,
   BarChart3, Bell, BookOpen, BrainCircuit, CalendarDays, Check, CheckCheck,
@@ -14,11 +13,7 @@ import {
   BarChart, Bar
 } from "recharts";
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const aiEndpoint = import.meta.env.VITE_AI_API_URL;
-const supabase = supabaseUrl && supabaseKey && !supabaseUrl.includes("YOUR_PROJECT")
-  ? createClient(supabaseUrl, supabaseKey) : null;
 
 const initialState = {
   tasks: [], goals: [], habits: [],
@@ -107,8 +102,8 @@ function Modal({ title, onClose, children, wide = false }) {
 export default function App() {
   const [page, setPage] = useState("Overview");
   const [data, setData] = useState(loadLocal);
-  const [user, setUser] = useState(() => supabase ? null : loadDemoSession());
-  const [authLoading, setAuthLoading] = useState(Boolean(supabase));
+  const [user, setUser] = useState(loadDemoSession);
+  const [authLoading, setAuthLoading] = useState(false);
   const [authModal, setAuthModal] = useState(false);
   const [profileMenu, setProfileMenu] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
@@ -142,12 +137,6 @@ export default function App() {
     }, 18);
     return () => clearTimeout(timer);
   }, [coachStreaming]);
-  useEffect(() => {
-    if (!supabase) { setAuthLoading(false); return; }
-    supabase.auth.getSession().then(({ data: { session } }) => { setUser(session?.user || null); setAuthLoading(false); });
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => setUser(session?.user || null));
-    return () => subscription.unsubscribe();
-  }, []);
   useEffect(() => {
     if (!focusRunning) return;
     const timer = setInterval(() => setFocusSeconds(s => {
@@ -256,46 +245,31 @@ export default function App() {
   }
   async function handleAuth(e) {
     e.preventDefault();
-    if (supabase) {
-      setAuthLoading(true);
-      if (authForm.mode === "signup") {
-        const { error } = await supabase.auth.signUp({ email: authForm.email, password: authForm.password, options: { data: { full_name: authForm.name } } });
-        setAuthLoading(false);
-        if (error) return notify(error.message);
-        setAuthModal(false); return notify("Account request sent. Check your email if verification is enabled.");
-      }
-      const { error } = await supabase.auth.signInWithPassword({ email: authForm.email, password: authForm.password });
-      setAuthLoading(false);
-      if (error) return notify(error.message);
-      setAuthModal(false); notify("Welcome back.");
-    } else {
-      if (!authForm.email.includes("@") || authForm.password.length < 6) return notify("Enter a valid email and a password with at least 6 characters.");
-      const email = authForm.email.trim().toLowerCase();
-      const accounts = loadDemoAccounts();
-      const existingAccount = accounts.find(account => account.email === email);
-      if (authForm.mode === "signup") {
-        if (existingAccount) return notify("An account with this email already exists. Sign in instead.");
-        const account = { email, password: authForm.password, name: authForm.name.trim() || email.split("@")[0] };
-        localStorage.setItem(demoAccountsKey, JSON.stringify([...accounts, account]));
-        const session = { email: account.email, user_metadata: { full_name: account.name } };
-        localStorage.setItem(demoSessionKey, JSON.stringify(session));
-        setUser(session);
-        setAuthModal(false);
-        return notify("Account created. Welcome to StreakUp.");
-      }
-      if (!existingAccount || existingAccount.password !== authForm.password) {
-        return notify("No matching account found. Check your email and password, or create an account first.");
-      }
-      const session = { email: existingAccount.email, user_metadata: { full_name: existingAccount.name } };
+    if (!authForm.email.includes("@") || authForm.password.length < 6) return notify("Enter a valid email and a password with at least 6 characters.");
+    const email = authForm.email.trim().toLowerCase();
+    const accounts = loadDemoAccounts();
+    const existingAccount = accounts.find(account => account.email === email);
+    if (authForm.mode === "signup") {
+      if (existingAccount) return notify("An account with this email already exists. Sign in instead.");
+      const account = { email, password: authForm.password, name: authForm.name.trim() || email.split("@")[0] };
+      localStorage.setItem(demoAccountsKey, JSON.stringify([...accounts, account]));
+      const session = { email: account.email, user_metadata: { full_name: account.name } };
       localStorage.setItem(demoSessionKey, JSON.stringify(session));
       setUser(session);
       setAuthModal(false);
-      notify("Welcome back.");
+      return notify("Account created. Welcome to StreakUp.");
     }
+    if (!existingAccount || existingAccount.password !== authForm.password) {
+      return notify("No matching account found. Check your email and password, or create an account first.");
+    }
+    const session = { email: existingAccount.email, user_metadata: { full_name: existingAccount.name } };
+    localStorage.setItem(demoSessionKey, JSON.stringify(session));
+    setUser(session);
+    setAuthModal(false);
+    notify("Welcome back.");
   }
   async function signOut() {
-    if (supabase) await supabase.auth.signOut();
-    else localStorage.removeItem(demoSessionKey);
+    localStorage.removeItem(demoSessionKey);
     setUser(null); setProfileMenu(false); notify("Signed out.");
   }
   async function sendCoach(e) {
@@ -317,9 +291,10 @@ export default function App() {
     }
     if (aiEndpoint) {
       try {
+        const headers = { "Content-Type": "application/json" };
         const response = await fetch(aiEndpoint, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers,
           body: JSON.stringify({
             message: q,
             conversation: coachMessages.map(({ role, text }) => ({ role, content: text })),
@@ -378,7 +353,7 @@ export default function App() {
             <button className="primary-button full" disabled={authLoading}>{authLoading ? "Please wait…" : authForm.mode === "signup" ? "Create account" : "Sign in"} <ArrowRight size={16}/></button>
             <button type="button" className="text-button" onClick={() => setAuthForm({...authForm, mode: authForm.mode === "signup" ? "signin" : "signup"})}>{authForm.mode === "signup" ? "Already have an account? Sign in" : "New here? Create an account"}</button>
           </form>
-          {!supabase && <p className="auth-disclaimer">Demo authentication is active. Configure Supabase environment variables for secure accounts and cross-device sync.</p>}
+          <p className="auth-disclaimer">Accounts are stored in this browser. For secure multi-device accounts, connect a separate authentication backend.</p>
         </section>
       </div>
       {toast && <div className="toast">{toast}</div>}
@@ -429,7 +404,7 @@ export default function App() {
         {!user && authForm.mode === "signup" && <label>Display name<input value={authForm.name} onChange={e=>setAuthForm({...authForm,name:e.target.value})} placeholder="Your name"/></label>}
         {!user && <><label>Email address<input type="email" required value={authForm.email} onChange={e=>setAuthForm({...authForm,email:e.target.value})} placeholder="you@example.com"/></label><label>Password<input type="password" minLength="6" required value={authForm.password} onChange={e=>setAuthForm({...authForm,password:e.target.value})} placeholder="At least 6 characters"/></label></>}
         {user ? <button type="button" className="primary-button full" onClick={() => setAuthModal(false)}>Done</button> : <><button className="primary-button full" disabled={authLoading}>{authLoading ? "Please wait…" : authForm.mode === "signup" ? "Create account" : "Sign in"} <ArrowRight size={16}/></button><button type="button" className="text-button" onClick={() => setAuthForm({...authForm,mode:authForm.mode === "signup" ? "signin" : "signup"})}>{authForm.mode === "signup" ? "Already have an account? Sign in" : "New here? Create an account"}</button></>}
-        {!supabase && !user && <div className="demo-warning"><CircleHelp size={16}/> Demo mode: session is not securely authenticated and does not sync across devices. Configure Supabase for real accounts.</div>}
+        {!user && <div className="demo-warning"><CircleHelp size={16}/> Accounts are stored only in this browser and do not sync across devices.</div>}
       </form>
     </Modal>}
     {toast && <div className="toast"><Check size={16}/>{toast}</div>}
@@ -543,7 +518,7 @@ function SettingsPage({ data, setData, onNotify, user }) {
   function change(key,value) { setData(d=>({...d,settings:{...d.settings,[key]:value}})); onNotify("Settings updated."); }
   return <>
     <SectionTitle eyebrow="MAKE IT YOURS" title="Settings" description="Choose the setup that supports your routine."/>
-    <div className="settings-layout"><div className="card settings-card"><div className="settings-section-head"><IconBox tone="violet"><CircleUserRound size={18}/></IconBox><div><h3>Account & privacy</h3><p>Manage your identity and data access.</p></div></div><div className="settings-row"><div><strong>Account status</strong><span>{user ? `Signed in as ${user.email}` : "Local demo mode — no secure account"}</span></div><Pill tone={user&&supabase?"positive":"warning"}>{user&&supabase?"Authenticated":user?"Demo session":"Local only"}</Pill></div><div className="settings-row"><div><strong>Private data</strong><span>{supabase?"Supabase connection configured":"Stored in this browser's local storage"}</span></div><ShieldCheck size={18} className="settings-icon"/></div></div>
+    <div className="settings-layout"><div className="card settings-card"><div className="settings-section-head"><IconBox tone="violet"><CircleUserRound size={18}/></IconBox><div><h3>Account & privacy</h3><p>Manage your identity and data access.</p></div></div><div className="settings-row"><div><strong>Account status</strong><span>{user ? `Signed in as ${user.email}` : "Local account — signed out"}</span></div><Pill tone={user?"warning":"neutral"}>{user?"Browser account":"Signed out"}</Pill></div><div className="settings-row"><div><strong>Private data</strong><span>Stored in this browser's local storage</span></div><ShieldCheck size={18} className="settings-icon"/></div></div>
       <div className="card settings-card"><div className="settings-section-head"><IconBox tone="blue"><Bell size={18}/></IconBox><div><h3>Reminders</h3><p>Keep reminders helpful, not overwhelming.</p></div></div><div className="settings-row"><div><strong>In-app reminders</strong><span>Show gentle reminder messages</span></div><button className={`toggle ${data.settings.reminders?"on":""}`} onClick={()=>change("reminders",!data.settings.reminders)}><i/></button></div><div className="settings-row"><div><strong>Grace days</strong><span>Recovery days allowed per week</span></div><select value={data.settings.graceDays} onChange={e=>change("graceDays",Number(e.target.value))}><option value="0">0 days</option><option value="1">1 day</option><option value="2">2 days</option></select></div></div>
       <div className="card settings-card"><div className="settings-section-head"><IconBox tone="amber"><Zap size={18}/></IconBox><div><h3>Experience & scoring</h3><p>Keep your system encouraging and transparent.</p></div></div><div className="settings-row"><div><strong>Current XP</strong><span>Earned through completed actions</span></div><strong>{data.xp} XP</strong></div><div className="settings-row"><div><strong>Consistency score</strong><span>Current score out of 100</span></div><strong>{data.consistency}/100</strong></div><button className="secondary-button" onClick={()=>{setData(initialState);onNotify("Workspace cleared.");}}>Clear workspace</button></div>
     </div>
