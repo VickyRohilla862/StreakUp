@@ -26,30 +26,26 @@ Open the local URL Vite prints in the terminal.
 - Local prototype circles and weekly challenges.
 - Settings and workspace clearing.
 - Required account creation/sign-in screen before entering the workspace.
-- Optional Supabase email/password auth integration when environment variables are configured.
+- Browser-based account creation and sign-in.
 
 ## Important prototype limitations
 
 This is a functional frontend prototype, not yet a production-grade multi-user service.
 
-- Without Supabase credentials, the required sign-in form uses browser-only demo accounts. These accounts persist across refreshes but do not provide secure authentication or cross-device sync. Data is saved only in that browser.
-- With Supabase configured, authentication works, but this starter does **not yet wire every UI task, goal, habit, score, and social action to database CRUD**. The SQL schema is included as the next integration step.
+- Accounts, workspace data, and chat history are stored in the browser. They persist across refreshes on the same device but do not provide secure authentication or cross-device sync.
 - AI Coach uses deterministic local rules unless `VITE_AI_API_URL` points to an existing server endpoint. The endpoint receives `{ message, conversation, context, webSearch: true, provider: "google-grounding" }` and must return `{ answer }`. The server should call Gemini with Google Search grounding, enforce authentication and authorization, and never expose provider keys in frontend variables.
 - Some weekly charts are illustrative sample data; the analytics screen labels this limitation.
 - Habit check-in editing is a prototype interaction; production streak calculations must use dated check-ins, the user's time zone, and idempotent server-side rules.
 - Social circles are local-only until membership, invitation, and authorization flows are implemented.
 - The current starter score logic is intentionally simple and should be replaced with a server-side score-event ledger before public launch.
 
-## Configure Supabase authentication
+## Configure the AI endpoint
 
-1. Create a Supabase project.
-2. Copy `.env.example` to `.env.local`.
-3. Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
-4. In Supabase Auth, configure email sign-in and allowed redirect URLs.
-5. Run `supabase/schema.sql` in the Supabase SQL Editor.
-6. Restart the Vite server.
+1. Copy `.env.example` to `.env.local`.
+2. Set `VITE_AI_API_URL` to an HTTPS backend endpoint.
+3. Restart the Vite server.
 
-Only the Supabase anon/public key belongs in frontend configuration. Never put a service-role key or private AI provider key in the browser.
+The endpoint receives `{ message, conversation, context, webSearch: true, provider: "google-grounding" }` and must return `{ answer }`. Keep Gemini or other private provider keys on the backend, never in frontend variables.
 
 ## Deploy to GitHub Pages
 
@@ -64,7 +60,7 @@ The published site will be available at `https://VickyRohilla862.github.io/Strea
 
 ## Suggested next implementation milestones
 
-1. Build a typed data-access layer and connect task/goal/habit/focus CRUD to Supabase.
+1. Build a typed data-access layer and connect task/goal/habit/focus CRUD to a backend.
 2. Implement date-based recurring tasks and timezone-aware streak calculations.
 3. Move score changes into an idempotent server-side ledger with audit events.
 4. Add private circle invitations, membership policies, challenges, and opt-in leaderboards.
@@ -77,5 +73,4 @@ The published site will be available at `https://VickyRohilla862.github.io/Strea
 - React + Vite
 - Lucide React
 - Recharts
-- Optional Supabase Auth
-- Supabase/Postgres schema starter
+- Browser local storage
