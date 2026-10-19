@@ -30,6 +30,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Validate Google OAuth configuration
+        run: |
+          if [ -z "$VITE_GOOGLE_CLIENT_ID" ]; then
+            echo "::error::VITE_GOOGLE_CLIENT_ID is missing. Add it under repository Settings > Secrets and variables > Actions > Variables or Secrets."
+            exit 1
+          fi
+        env:
+          VITE_GOOGLE_CLIENT_ID: ${{ vars.VITE_GOOGLE_CLIENT_ID || secrets.VITE_GOOGLE_CLIENT_ID }}
+
       - name: Build
         run: npm run build
         env:
