@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 392 64" role="img" aria-labelledby="title desc">
+  <title id="title">StreakUp logo</title>
+  <desc id="desc">A violet Activity mark followed by the StreakUp wordmark</desc>
+  <defs>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#b49bff"/>
+      <stop offset="1" stop-color="#7653e9"/>
+    </linearGradient>
+    <linearGradient id="wordmark" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#c6b7ff"/>
+      <stop offset="1" stop-color="#8f70f4"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="64" height="64" rx="20" fill="url(#mark)"/>
+  <path d="M14 32h8l7-17 8 34 7-17h6" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="80" y="42" fill="#f4f2fc" font-family="Manrope, Arial, sans-serif" font-size="34" font-weight="800" letter-spacing="-1.6">streak<tspan fill="url(#wordmark)">up</tspan></text>
+</svg>
