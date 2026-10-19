@@ -14,7 +14,7 @@ import {
 } from "recharts";
 
 const aiEndpoint = import.meta.env.VITE_AI_API_URL;
-const authEndpoint = import.meta.env.VITE_AUTH_API_URL;
+const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
 
 const initialState = {
   tasks: [], goals: [], habits: [],
@@ -33,7 +33,6 @@ const nav = [
 ];
 const chartData = [];
 const storageKey = "streakup-state-v3";
-const demoAccountsKey = "streakup-demo-accounts-v1";
 const demoSessionKey = "streakup-demo-session-v1";
 const coachStorageKey = "streakup-coach-conversations-v1";
 const fmtDate = (d = new Date()) => d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
@@ -53,12 +52,6 @@ function loadDemoSession() {
     const raw = localStorage.getItem(demoSessionKey);
     return raw ? JSON.parse(raw) : null;
   } catch { return null; }
-}
-function loadDemoAccounts() {
-  try {
-    const raw = localStorage.getItem(demoAccountsKey);
-    return raw ? JSON.parse(raw) : [];
-  } catch { return []; }
 }
 function createCoachConversation() {
   return {
@@ -119,9 +112,7 @@ export default function App() {
   const [currentCoachId, setCurrentCoachId] = useState(null);
   const [coachInput, setCoachInput] = useState("");
   const [coachStreaming, setCoachStreaming] = useState(null);
-  const [authForm, setAuthForm] = useState({ email: "", password: "", name: "", mode: "signup" });
   const [accountForm, setAccountForm] = useState({ email: "", name: "" });
-  const [pendingVerification, setPendingVerification] = useState(null);
 
   useEffect(() => { localStorage.setItem(storageKey, JSON.stringify(data)); }, [data]);
   useEffect(() => { localStorage.setItem(coachStorageKey, JSON.stringify(coachConversations)); }, [coachConversations]);
@@ -163,6 +154,36 @@ export default function App() {
   useEffect(() => {
     if (user) setAccountForm({ email: user.email || "", name: user.user_metadata?.full_name || "" });
   }, [user]);
+  useEffect(() => {
+    window.handleGoogleCredential = credentialResponse => {
+      try {
+        const payload = JSON.parse(window.atob(credentialResponse.credential.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+        const session = { email: payload.email, user_metadata: { full_name: payload.name, avatar_url: payload.picture } };
+        localStorage.setItem(demoSessionKey, JSON.stringify(session));
+        setUser(session);
+        setAuthModal(false);
+        notify("Signed in with Google.");
+      } catch (error) {
+        console.error("Google sign-in response could not be read.", error);
+        notify("Google sign-in could not be completed.");
+      }
+    };
+    if (!googleClientId) return () => { delete window.handleGoogleCredential; };
+    const renderGoogleButton = () => {
+      if (!window.google?.accounts?.id) return false;
+      window.google.accounts.id.initialize({ client_id: googleClientId, callback: window.handleGoogleCredential });
+      const button = document.getElementById("google-signin-button");
+      if (button) window.google.accounts.id.renderButton(button, { theme: "outline", size: "large", width: 320, text: "continue_with" });
+      return true;
+    };
+    if (!renderGoogleButton()) {
+      const timer = window.setInterval(() => {
+        if (renderGoogleButton()) window.clearInterval(timer);
+      }, 200);
+      return () => { window.clearInterval(timer); delete window.handleGoogleCredential; };
+    }
+    return () => { delete window.handleGoogleCredential; };
+  }, [authModal]);
 
   function updateTask(id, patch) {
     setData(d => {
@@ -250,86 +271,6 @@ export default function App() {
   function toggleCoachPin(id) {
     setCoachConversations(conversations => conversations.map(conversation => conversation.id === id ? { ...conversation, pinned: !conversation.pinned } : conversation));
   }
-  async function requestOtp({ purpose, email, account }) {
-    if (authEndpoint) {
-      const response = await fetch(authEndpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "request-otp", purpose, email, name: account?.name })
-      });
-      if (!response.ok) throw new Error(`OTP service returned HTTP ${response.status}.`);
-      return { email, account };
-    }
-    return { email, account, code: String(Math.floor(100000 + Math.random() * 900000)) };
-  }
-
-  async function verifyOtp(code) {
-    if (!pendingVerification) return;
-    if (authEndpoint) {
-      const response = await fetch(authEndpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "verify-otp",
-          purpose: pendingVerification.purpose,
-          email: pendingVerification.email,
-          code
-        })
-      });
-      if (!response.ok) throw new Error(`OTP verification returned HTTP ${response.status}.`);
-    } else if (code !== pendingVerification.code) {
-      throw new Error("That development OTP is incorrect.");
-    }
-    const { purpose, account, email } = pendingVerification;
-    if (purpose === "signup") {
-      const verifiedAccount = { ...account, verified: true };
-      localStorage.setItem(demoAccountsKey, JSON.stringify([...loadDemoAccounts(), verifiedAccount]));
-      const session = { email: verifiedAccount.email, user_metadata: { full_name: verifiedAccount.name } };
-      localStorage.setItem(demoSessionKey, JSON.stringify(session));
-      setUser(session);
-      setAuthForm({ email: "", password: "", name: "", mode: "signup" });
-      notify("Email verified. Welcome to StreakUp.");
-    } else {
-      const accounts = loadDemoAccounts().map(item => item.email === user.email
-        ? { ...item, email, name: account?.name || item.name }
-        : item);
-      localStorage.setItem(demoAccountsKey, JSON.stringify(accounts));
-      const session = { email, user_metadata: { full_name: account?.name || displayName } };
-      localStorage.setItem(demoSessionKey, JSON.stringify(session));
-      setUser(session);
-      setAccountForm({ email, name: session.user_metadata.full_name });
-      notify("Email verified and account updated.");
-    }
-    setPendingVerification(null);
-  }
-
-  async function handleAuth(e) {
-    e.preventDefault();
-    if (!authForm.email.includes("@") || authForm.password.length < 6) return notify("Enter a valid email and a password with at least 6 characters.");
-    const email = authForm.email.trim().toLowerCase();
-    const accounts = loadDemoAccounts();
-    const existingAccount = accounts.find(account => account.email === email);
-    if (authForm.mode === "signup") {
-      if (existingAccount) return notify("An account with this email already exists. Sign in instead.");
-      const account = { email, password: authForm.password, name: authForm.name.trim() || email.split("@")[0] };
-      try {
-        const verification = await requestOtp({ purpose: "signup", email, account });
-        setPendingVerification({ purpose: "signup", ...verification });
-        return notify(authEndpoint ? `A verification code was sent to ${email}.` : "Development OTP ready in the verification dialog.");
-      } catch (error) {
-        console.error("Sign-up OTP request failed.", error);
-        return notify("We could not send a verification code. Try again.");
-      }
-    }
-    if (!existingAccount || existingAccount.password !== authForm.password || existingAccount.verified === false) {
-      return notify("No matching verified account found. Check your email and password, or create an account first.");
-    }
-    const session = { email: existingAccount.email, user_metadata: { full_name: existingAccount.name } };
-    localStorage.setItem(demoSessionKey, JSON.stringify(session));
-    setUser(session);
-    setAuthModal(false);
-    notify("Welcome back.");
-  }
   async function signOut() {
     localStorage.removeItem(demoSessionKey);
     setUser(null); setProfileMenu(false); notify("Signed out.");
@@ -337,30 +278,13 @@ export default function App() {
   function saveAccountName(name) {
     const nextName = name.trim();
     if (!nextName) return notify("Enter a display name.");
-    const accounts = loadDemoAccounts().map(item => item.email === user.email ? { ...item, name: nextName } : item);
-    localStorage.setItem(demoAccountsKey, JSON.stringify(accounts));
     const session = { ...user, user_metadata: { ...user.user_metadata, full_name: nextName } };
     localStorage.setItem(demoSessionKey, JSON.stringify(session));
     setUser(session);
     notify("Display name updated.");
   }
-  async function startEmailChange(email) {
-    const nextEmail = email.trim().toLowerCase();
-    if (!nextEmail.includes("@")) return notify("Enter a valid email address.");
-    if (nextEmail === user.email) return notify("That is already your email address.");
-    if (loadDemoAccounts().some(account => account.email === nextEmail)) return notify("That email is already in use.");
-    try {
-      const verification = await requestOtp({ purpose: "email-change", email: nextEmail, account: { name: displayName } });
-      setPendingVerification({ purpose: "email-change", ...verification });
-      notify(authEndpoint ? `A verification code was sent to ${nextEmail}.` : "Development OTP ready in the verification dialog.");
-    } catch (error) {
-      console.error("Email-change OTP request failed.", error);
-      notify("We could not send a verification code. Try again.");
-    }
-  }
   function deleteAccount() {
     if (!window.confirm("Delete your account and this browser's workspace? This cannot be undone.")) return;
-    localStorage.setItem(demoAccountsKey, JSON.stringify(loadDemoAccounts().filter(account => account.email !== user.email)));
     localStorage.removeItem(demoSessionKey);
     localStorage.removeItem(storageKey);
     localStorage.removeItem(coachStorageKey);
@@ -440,17 +364,11 @@ export default function App() {
           <div className="auth-benefits"><span><Check size={14}/> Plan your next small step</span><span><Check size={14}/> Track habits and focus sessions</span><span><Check size={14}/> Keep your progress private</span></div>
         </section>
         <section className="card auth-card">
-          <div className="eyebrow">{authForm.mode === "signup" ? "GET STARTED" : "WELCOME BACK"}</div>
-          <h2>{authForm.mode === "signup" ? "Create your account" : "Sign in to StreakUp"}</h2>
-          <p className="auth-card-copy">{authForm.mode === "signup" ? "Start with a clear plan and make progress that compounds." : "Pick up where you left off."}</p>
-          <form className="form-stack" onSubmit={handleAuth}>
-            {authForm.mode === "signup" && <label>Display name<input value={authForm.name} onChange={e=>setAuthForm({...authForm,name:e.target.value})} placeholder="Your name"/></label>}
-            <label>Email address<input type="email" required value={authForm.email} onChange={e=>setAuthForm({...authForm,email:e.target.value})} placeholder="you@example.com"/></label>
-            <label>Password<input type="password" minLength="6" required value={authForm.password} onChange={e=>setAuthForm({...authForm,password:e.target.value})} placeholder="At least 6 characters"/></label>
-            <button className="primary-button full" disabled={authLoading}>{authLoading ? "Please wait…" : authForm.mode === "signup" ? "Create account" : "Sign in"} <ArrowRight size={16}/></button>
-            <button type="button" className="text-button" onClick={() => setAuthForm({...authForm, mode: authForm.mode === "signup" ? "signin" : "signup"})}>{authForm.mode === "signup" ? "Already have an account? Sign in" : "New here? Create an account"}</button>
-          </form>
-          <p className="auth-disclaimer">Accounts are stored in this browser. For secure multi-device accounts, connect a separate authentication backend.</p>
+          <div className="eyebrow">GET STARTED</div>
+          <h2>Continue with Google</h2>
+          <p className="auth-card-copy">Use your Google account to securely access your StreakUp workspace.</p>
+          {googleClientId ? <div id="google-signin-button" className="google-signin-button"/> : <div className="demo-warning"><CircleHelp size={16}/> Add <code>VITE_GOOGLE_CLIENT_ID</code> to enable Google Sign-In.</div>}
+          <p className="auth-disclaimer">Your name and email come from Google. You can edit your display name in Account settings.</p>
         </section>
       </div>
       {toast && <div className="toast">{toast}</div>}
@@ -490,21 +408,15 @@ export default function App() {
         {page === "AI coach" && <CoachPage messages={coachMessages} input={coachInput} setInput={setCoachInput} onSend={sendCoach} data={data} conversations={coachConversations} currentId={activeCoachId} onSelect={id => setCurrentCoachId(id)} onNew={newCoachConversation} onDelete={deleteCoachConversation} onPin={toggleCoachPin} isTyping={Boolean(coachStreaming)} />}
         {page === "Analytics" && <AnalyticsPage data={data} />}
         {page === "Accountability" && <AccountabilityPage data={data} setData={setData} onNotify={notify} />}
-        {page === "Settings" && <SettingsPage data={data} setData={setData} onNotify={notify} user={user} accountForm={accountForm} setAccountForm={setAccountForm} onSaveName={saveAccountName} onChangeEmail={startEmailChange} onSignOut={signOut} onDeleteAccount={deleteAccount} />}
+        {page === "Settings" && <SettingsPage data={data} setData={setData} onNotify={notify} user={user} accountForm={accountForm} setAccountForm={setAccountForm} onSaveName={saveAccountName} onSignOut={signOut} onDeleteAccount={deleteAccount} />}
       </div>
       <footer className="footer"><span>STREAKUP © {new Date().getFullYear()}</span><span>Progress over perfection <span className="footer-heart">♥</span></span></footer>
     </main>
     {addModal && <AddModal type={addModal} onClose={() => setAddModal(null)} onTask={addTask} onGoal={addGoal} onHabit={addHabit}/>}
     {authModal && <Modal title={user ? "Your account" : "Welcome to StreakUp"} onClose={() => setAuthModal(false)}>
       {user && <div className="auth-note"><ShieldCheck size={18}/> Signed in as <strong>{user.email}</strong></div>}
-      <form className="form-stack" onSubmit={handleAuth}>
-        {!user && authForm.mode === "signup" && <label>Display name<input value={authForm.name} onChange={e=>setAuthForm({...authForm,name:e.target.value})} placeholder="Your name"/></label>}
-        {!user && <><label>Email address<input type="email" required value={authForm.email} onChange={e=>setAuthForm({...authForm,email:e.target.value})} placeholder="you@example.com"/></label><label>Password<input type="password" minLength="6" required value={authForm.password} onChange={e=>setAuthForm({...authForm,password:e.target.value})} placeholder="At least 6 characters"/></label></>}
-        {user ? <button type="button" className="primary-button full" onClick={() => setAuthModal(false)}>Done</button> : <><button className="primary-button full" disabled={authLoading}>{authLoading ? "Please wait…" : authForm.mode === "signup" ? "Create account" : "Sign in"} <ArrowRight size={16}/></button><button type="button" className="text-button" onClick={() => setAuthForm({...authForm,mode:authForm.mode === "signup" ? "signin" : "signup"})}>{authForm.mode === "signup" ? "Already have an account? Sign in" : "New here? Create an account"}</button></>}
-        {!user && <div className="demo-warning"><CircleHelp size={16}/> Accounts are stored only in this browser and do not sync across devices.</div>}
-      </form>
+      {user ? <button type="button" className="primary-button full" onClick={() => setAuthModal(false)}>Done</button> : googleClientId ? <div id="google-signin-button" className="google-signin-button"/> : <div className="demo-warning"><CircleHelp size={16}/> Google Sign-In is not configured.</div>}
     </Modal>}
-    {pendingVerification && <OtpModal pending={pendingVerification} onClose={() => setPendingVerification(null)} onVerify={verifyOtp} />}
     {toast && <div className="toast"><Check size={16}/>{toast}</div>}
   </div>;
 }
@@ -612,26 +524,17 @@ function AccountabilityPage({ data, setData, onNotify }) {
     <div className="info-banner"><ShieldCheck size={18}/><div><strong>Social features are local prototype data</strong><p>Shared groups, real friend invitations, leaderboards and cross-user challenge tracking require a backend and server-side permissions.</p></div></div>
   </>;
 }
-function SettingsPage({ data, setData, onNotify, user, accountForm, setAccountForm, onSaveName, onChangeEmail, onSignOut, onDeleteAccount }) {
+function SettingsPage({ data, setData, onNotify, user, accountForm, setAccountForm, onSaveName, onSignOut, onDeleteAccount }) {
   function change(key,value) { setData(d=>({...d,settings:{...d.settings,[key]:value}})); onNotify("Settings updated."); }
   return <>
     <SectionTitle eyebrow="MAKE IT YOURS" title="Account settings" description="Manage your profile, security and workspace preferences."/>
     <div className="settings-layout"><div className="card settings-card"><div className="settings-section-head"><IconBox tone="violet"><CircleUserRound size={18}/></IconBox><div><h3>Account & privacy</h3><p>Manage your identity and data access.</p></div></div><div className="settings-row"><div><strong>Account status</strong><span>{user ? `Signed in as ${user.email}` : "Local account — signed out"}</span></div><Pill tone={user?"warning":"neutral"}>{user?"Browser account":"Signed out"}</Pill></div><div className="settings-row"><div><strong>Private data</strong><span>Stored in this browser's local storage</span></div><ShieldCheck size={18} className="settings-icon"/></div></div>
-      <div className="card settings-card"><div className="settings-section-head"><IconBox tone="violet"><CircleUserRound size={18}/></IconBox><div><h3>Profile information</h3><p>Update your display name or verify a new email address.</p></div></div><form className="form-stack" onSubmit={e=>{e.preventDefault();onSaveName(accountForm.name);}}><label>Display name<input value={accountForm.name} onChange={e=>setAccountForm({...accountForm,name:e.target.value})} required /></label><button className="primary-button">Save name</button></form><form className="form-stack" onSubmit={e=>{e.preventDefault();onChangeEmail(accountForm.email);}}><label>Email address<input type="email" value={accountForm.email} onChange={e=>setAccountForm({...accountForm,email:e.target.value})} required /></label><button className="secondary-button">Change email and send OTP</button></form></div>
+      <div className="card settings-card"><div className="settings-section-head"><IconBox tone="violet"><CircleUserRound size={18}/></IconBox><div><h3>Profile information</h3><p>Your email is managed by Google. Update your StreakUp display name here.</p></div></div><form className="form-stack" onSubmit={e=>{e.preventDefault();onSaveName(accountForm.name);}}><label>Display name<input value={accountForm.name} onChange={e=>setAccountForm({...accountForm,name:e.target.value})} required /></label><button className="primary-button">Save name</button></form><div className="settings-row"><div><strong>Google email</strong><span>{accountForm.email}</span></div><Pill tone="positive">Verified by Google</Pill></div></div>
       <div className="card settings-card"><div className="settings-section-head"><IconBox tone="blue"><ShieldCheck size={18}/></IconBox><div><h3>Account access</h3><p>End this session or permanently remove your local account.</p></div></div><div className="settings-row"><div><strong>Sign out</strong><span>Remove this browser session</span></div><button className="secondary-button" onClick={onSignOut}><LogOut size={15}/> Sign out</button></div><div className="settings-row danger-row"><div><strong>Delete account</strong><span>Delete your account and all workspace data from this browser</span></div><button className="danger-button" onClick={onDeleteAccount}>Delete account</button></div></div>
       <div className="card settings-card"><div className="settings-section-head"><IconBox tone="blue"><Bell size={18}/></IconBox><div><h3>Reminders</h3><p>Keep reminders helpful, not overwhelming.</p></div></div><div className="settings-row"><div><strong>In-app reminders</strong><span>Show gentle reminder messages</span></div><button className={`toggle ${data.settings.reminders?"on":""}`} onClick={()=>change("reminders",!data.settings.reminders)}><i/></button></div><div className="settings-row"><div><strong>Grace days</strong><span>Recovery days allowed per week</span></div><select value={data.settings.graceDays} onChange={e=>change("graceDays",Number(e.target.value))}><option value="0">0 days</option><option value="1">1 day</option><option value="2">2 days</option></select></div></div>
       <div className="card settings-card"><div className="settings-section-head"><IconBox tone="amber"><Zap size={18}/></IconBox><div><h3>Experience & scoring</h3><p>Keep your system encouraging and transparent.</p></div></div><div className="settings-row"><div><strong>Current XP</strong><span>Earned through completed actions</span></div><strong>{data.xp} XP</strong></div><div className="settings-row"><div><strong>Consistency score</strong><span>Current score out of 100</span></div><strong>{data.consistency}/100</strong></div><button className="secondary-button" onClick={()=>{setData(initialState);onNotify("Workspace cleared.");}}>Clear workspace</button></div>
     </div>
   </>;
-}
-function OtpModal({ pending, onClose, onVerify }) {
-  const [code, setCode] = useState("");
-  const [error, setError] = useState("");
-  const submit = async e => {
-    e.preventDefault();
-    try { await onVerify(code.trim()); } catch (verificationError) { setError(verificationError.message); }
-  };
-  return <Modal title="Verify your email" onClose={onClose}><form className="form-stack" onSubmit={submit}><p className="auth-card-copy">Enter the six-digit code sent to <strong>{pending.email}</strong>.</p>{pending.code && <div className="demo-warning"><CircleHelp size={16}/> Development mode: your OTP is <strong>{pending.code}</strong>. Configure <code>VITE_AUTH_API_URL</code> for real email delivery.</div>}<label>Verification code<input inputMode="numeric" pattern="[0-9]{6}" maxLength="6" value={code} onChange={e=>{setCode(e.target.value.replace(/\D/g,""));setError("");}} autoFocus required /></label>{error && <div className="form-error">{error}</div>}<button className="primary-button full" disabled={code.length !== 6}>Verify email <Check size={16}/></button></form></Modal>;
 }
 function AddModal({ type, onClose, onTask, onGoal, onHabit }) {
   const [form,setForm] = useState({title:"",category:"Study",due:"Today",priority:"Medium",minutes:25,recurring:"None",horizon:"Monthly",target:"",icon:"book",color:"violet"});

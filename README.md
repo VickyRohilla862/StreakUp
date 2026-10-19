@@ -28,14 +28,14 @@ Open the local URL Vite prints in the terminal.
 - Required account creation/sign-in screen before entering the workspace.
 - Browser-based account creation and sign-in.
 - Account settings for editing the display name, requesting email changes, signing out, and deleting the local account.
-- OTP verification flow for sign-up and email changes. Configure `VITE_AUTH_API_URL` for real email delivery; without it, the UI uses an explicitly labeled development OTP.
+- Google Sign-In entry flow using Google Identity Services.
 
 ## Important prototype limitations
 
 This is a functional frontend prototype, not yet a production-grade multi-user service.
 
 - Accounts, workspace data, and chat history are stored in the browser. They persist across refreshes on the same device but do not provide secure authentication or cross-device sync.
-- OTP delivery is only real when `VITE_AUTH_API_URL` is configured. The local fallback is for development only and must not be used for production authentication.
+- Email and account identity are managed by Google; there is no local password or OTP flow.
 - AI Coach uses deterministic local rules unless `VITE_AI_API_URL` points to an existing server endpoint. The endpoint receives `{ message, conversation, context, webSearch: true, provider: "google-grounding" }` and must return `{ answer }`. The server should call Gemini with Google Search grounding, enforce authentication and authorization, and never expose provider keys in frontend variables.
 - Some weekly charts are illustrative sample data; the analytics screen labels this limitation.
 - Habit check-in editing is a prototype interaction; production streak calculations must use dated check-ins, the user's time zone, and idempotent server-side rules.
@@ -50,15 +50,19 @@ This is a functional frontend prototype, not yet a production-grade multi-user s
 
 The endpoint receives `{ message, conversation, context, webSearch: true, provider: "google-grounding" }` and must return `{ answer }`. Keep Gemini or other private provider keys on the backend, never in frontend variables.
 
-## Configure account OTP delivery
+## Configure Google Sign-In
 
-Set `VITE_AUTH_API_URL` to a server-side HTTPS endpoint. The frontend sends JSON
-requests with `action: "request-otp"` or `action: "verify-otp"` and includes
-`purpose` (`"signup"` or `"email-change"`), `email`, and (for verification)
-`code`. The server must rate-limit requests, hash or expire OTPs, send the
-message through an email provider, and enforce authenticated authorization for
-email changes. Never implement production password or OTP verification only in
-the browser.
+1. In Google Cloud Console, create an OAuth 2.0 **Web application** client.
+2. Add `https://VickyRohilla862.github.io` to Authorized JavaScript origins.
+3. Add the local development origin, usually `http://localhost:5173`.
+4. Create a GitHub repository variable named `VITE_GOOGLE_CLIENT_ID` with the
+   client ID.
+5. Redeploy the GitHub Pages workflow.
+
+The Google Identity Services script is loaded in `index.html`. The frontend
+uses the Google credential to establish the prototype session. For a
+production multi-user app, send the credential to a backend and verify the
+Google token server-side before issuing an application session.
 
 ## Deploy to GitHub Pages
 
