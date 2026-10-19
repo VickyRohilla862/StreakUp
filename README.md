@@ -27,12 +27,15 @@ Open the local URL Vite prints in the terminal.
 - Settings and workspace clearing.
 - Required account creation/sign-in screen before entering the workspace.
 - Browser-based account creation and sign-in.
+- Account settings for editing the display name, requesting email changes, signing out, and deleting the local account.
+- OTP verification flow for sign-up and email changes. Configure `VITE_AUTH_API_URL` for real email delivery; without it, the UI uses an explicitly labeled development OTP.
 
 ## Important prototype limitations
 
 This is a functional frontend prototype, not yet a production-grade multi-user service.
 
 - Accounts, workspace data, and chat history are stored in the browser. They persist across refreshes on the same device but do not provide secure authentication or cross-device sync.
+- OTP delivery is only real when `VITE_AUTH_API_URL` is configured. The local fallback is for development only and must not be used for production authentication.
 - AI Coach uses deterministic local rules unless `VITE_AI_API_URL` points to an existing server endpoint. The endpoint receives `{ message, conversation, context, webSearch: true, provider: "google-grounding" }` and must return `{ answer }`. The server should call Gemini with Google Search grounding, enforce authentication and authorization, and never expose provider keys in frontend variables.
 - Some weekly charts are illustrative sample data; the analytics screen labels this limitation.
 - Habit check-in editing is a prototype interaction; production streak calculations must use dated check-ins, the user's time zone, and idempotent server-side rules.
@@ -46,6 +49,16 @@ This is a functional frontend prototype, not yet a production-grade multi-user s
 3. Restart the Vite server.
 
 The endpoint receives `{ message, conversation, context, webSearch: true, provider: "google-grounding" }` and must return `{ answer }`. Keep Gemini or other private provider keys on the backend, never in frontend variables.
+
+## Configure account OTP delivery
+
+Set `VITE_AUTH_API_URL` to a server-side HTTPS endpoint. The frontend sends JSON
+requests with `action: "request-otp"` or `action: "verify-otp"` and includes
+`purpose` (`"signup"` or `"email-change"`), `email`, and (for verification)
+`code`. The server must rate-limit requests, hash or expire OTPs, send the
+message through an email provider, and enforce authenticated authorization for
+email changes. Never implement production password or OTP verification only in
+the browser.
 
 ## Deploy to GitHub Pages
 
