@@ -56,7 +56,8 @@ The endpoint receives `{ message, conversation, context, webSearch: true, provid
 2. Add `https://VickyRohilla862.github.io` to Authorized JavaScript origins.
 3. Add the local development origin, usually `http://localhost:5173`.
 4. Create a GitHub repository variable named `VITE_GOOGLE_CLIENT_ID` with the
-   client ID.
+   client ID under **Settings → Secrets and variables → Actions → Variables**.
+   A repository Actions secret with the same name also works.
 5. Redeploy the GitHub Pages workflow.
 
 The Google Identity Services script is loaded in `index.html`. The frontend

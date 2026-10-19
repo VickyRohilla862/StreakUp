@@ -210,13 +210,20 @@ export default function App() {
     setAddModal(null); notify("Habit added.");
   }
   function toggleHabit(id, dayIndex = 6) {
-    setData(d => ({ ...d, habits: d.habits.map(h => {
-      if (h.id !== id) return h;
-      const days = [...h.days]; days[dayIndex] = days[dayIndex] ? 0 : 1;
-      const streak = days[dayIndex] ? h.streak + 1 : Math.max(0, h.streak - 1);
-      return { ...h, days, streak };
-    }), xp: d.xp + 8 }));
-    notify("+8 XP · Habit progress recorded.");
+    const habit = data.habits.find(h => h.id === id);
+    if (!habit) return;
+    const checked = !habit.days[dayIndex];
+    setData(d => ({
+      ...d,
+      habits: d.habits.map(h => {
+        if (h.id !== id) return h;
+        const days = [...h.days];
+        days[dayIndex] = checked ? 1 : 0;
+        return { ...h, days, streak: checked ? h.streak + 1 : Math.max(0, h.streak - 1) };
+      }),
+      xp: checked ? d.xp + 8 : d.xp
+    }));
+    notify(checked ? "+8 XP · Habit progress recorded." : "Habit check-in removed.");
   }
   function setTodaysStreak() {
     const todayIndex = (new Date().getDay() + 6) % 7;
@@ -423,7 +430,9 @@ export default function App() {
 
 function Overview({ data, todayTasks, completedToday, completion, onPage, onAdd, onSetStreak, onToggle, onNotify }) {
   const pending = todayTasks.filter(t=>!t.completed);
+  const todayIndex = (new Date().getDay() + 6) % 7;
   const hasStreakActivity = data.habits.some(h => h.streak > 0 || h.days?.some(Boolean));
+  const hasTodaysStreak = data.habits.length > 0 && data.habits.every(h => h.days[todayIndex]);
   const hasRecordedActivity = data.completedTotal > 0 || hasStreakActivity || data.focusSessions > 0;
   const hasFocusActivity = data.focusSessions > 0 || data.focusMinutes > 0;
   return <>
@@ -438,7 +447,7 @@ function Overview({ data, todayTasks, completedToday, completion, onPage, onAdd,
         <div className="card-heading"><span className="eyebrow">STREAK SPOTLIGHT</span>{hasStreakActivity && <div className="streak-icon"><Flame size={18} fill="currentColor"/></div>}</div>
         <div className="streak-number">{Math.max(0,...data.habits.map(h=>h.streak))}<span> days</span></div><p className="muted">Your longest active habit streak</p>
         <div className="streak-days">{["M","T","W","T","F","S","S"].map((d,i)=><div key={i} className={`streak-day ${data.habits.some(h=>h.days[i]) ? "done" : ""}`}><span>{d}</span><div>{data.habits.some(h=>h.days[i]) ? <Check size={13}/> : <span/>}</div></div>)}</div>
-        <button className="inline-link" onClick={hasStreakActivity ? ()=>onPage("Habits & streaks") : onSetStreak}>{hasStreakActivity ? "Keep the streak alive" : "Set today's streak"} <ArrowRight size={14}/></button>
+        <button className="inline-link" onClick={hasTodaysStreak ? ()=>onPage("Habits & streaks") : onSetStreak}>{hasTodaysStreak ? "View your streaks" : "Set today's streak"} <ArrowRight size={14}/></button>
       </div>
     </div>
     <div className="stats-grid">
@@ -478,10 +487,11 @@ function TasksPage({ data, tasks, search, setSearch, onAddTask, onAddGoal, onTog
   </>;
 }
 function HabitsPage({ data, onAdd, onToggle }) {
+  const todayIndex = (new Date().getDay() + 6) % 7;
   return <>
     <SectionTitle eyebrow="SHOW UP FOR YOURSELF" title="Habits & streaks" description="Consistency is built in the ordinary moments. Track the little things." action={<button className="primary-button" onClick={onAdd}><Plus size={16}/> New habit</button>}/>
     <div className="habit-summary-grid"><div className="card habit-summary"><IconBox tone="amber"><Flame size={18}/></IconBox><span>Active streaks</span><strong>{data.habits.filter(h=>h.streak>0).length}</strong><small>habits you're building</small></div><div className="card habit-summary"><IconBox tone="mint"><CalendarCheck size={18}/></IconBox><span>Weekly check-ins</span><strong>{data.habits.reduce((s,h)=>s+h.days.reduce((a,b)=>a+b,0),0)}</strong><small>completed habit days</small></div><div className="card habit-summary"><IconBox tone="violet"><Trophy size={18}/></IconBox><span>Longest streak</span><strong>{Math.max(0,...data.habits.map(h=>h.streak))} <small>days</small></strong><small>keep building momentum</small></div></div>
-    <div className="habit-list">{data.habits.map(h=><div className="card habit-card" key={h.id}><div className="habit-card-head"><IconBox tone={h.color==="mint"?"mint":h.color==="orange"?"amber":"violet"}>{h.icon==="heart"?<Heart size={18}/>:h.icon==="star"?<Star size={18}/>:<BookOpen size={18}/>}</IconBox><div className="habit-info"><strong>{h.title}</strong><span>{h.streak} day streak · Daily habit</span></div><div className="habit-streak"><Flame size={15} fill="currentColor"/>{h.streak}</div><button className="primary-button small" onClick={()=>onToggle(h.id)}>Check in <Check size={14}/></button></div><div className="habit-week"><span className="week-label">THIS WEEK</span>{["M","T","W","T","F","S","S"].map((d,i)=><button key={i} className={`habit-day ${h.days[i]?"checked":""}`} onClick={()=>onToggle(h.id,i)} title={`Toggle ${d}`}>{h.days[i]?<Check size={13}/>:d}</button>)}</div></div>)}</div>
+    <div className="habit-list">{data.habits.map(h=><div className="card habit-card" key={h.id}><div className="habit-card-head"><IconBox tone={h.color==="mint"?"mint":h.color==="orange"?"amber":"violet"}>{h.icon==="heart"?<Heart size={18}/>:h.icon==="star"?<Star size={18}/>:<BookOpen size={18}/>}</IconBox><div className="habit-info"><strong>{h.title}</strong><span>{h.streak} day streak · Daily habit</span></div><div className="habit-streak"><Flame size={15} fill="currentColor"/>{h.streak}</div><button className="primary-button small" onClick={()=>onToggle(h.id,todayIndex)}>{h.days[todayIndex] ? "Checked in" : "Check in"} <Check size={14}/></button></div><div className="habit-week"><span className="week-label">THIS WEEK</span>{["M","T","W","T","F","S","S"].map((d,i)=><button key={i} className={`habit-day ${h.days[i]?"checked":""}`} onClick={()=>onToggle(h.id,i)} title={`Toggle ${d}`}>{h.days[i]?<Check size={13}/>:d}</button>)}</div></div>)}</div>
     <div className="info-banner"><Sparkles size={18}/><div><strong>Progress over perfection</strong><p>A missed day doesn't erase the work you've done. Focus on your next small action.</p></div></div>
   </>;
 }
