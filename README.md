@@ -51,6 +51,17 @@ This is a functional frontend prototype, not yet a production-grade multi-user s
 
 Only the Supabase anon/public key belongs in frontend configuration. Never put a service-role key or private AI provider key in the browser.
 
+## Deploy to GitHub Pages
+
+This repository includes a GitHub Actions workflow at `.github/workflows/deploy.yml`.
+
+1. Push the repository to GitHub.
+2. In the repository, open **Settings → Pages**.
+3. Set **Source** to **GitHub Actions**.
+4. Push to `main` or run the **Deploy to GitHub Pages** workflow manually.
+
+The published site will be available at `https://VickyRohilla862.github.io/StreakUp/`.
+
 ## Suggested next implementation milestones
 
 1. Build a typed data-access layer and connect task/goal/habit/focus CRUD to Supabase.
