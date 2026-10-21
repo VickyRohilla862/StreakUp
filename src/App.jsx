@@ -212,6 +212,11 @@ export default function App() {
   function toggleHabit(id, dayIndex = 6) {
     const habit = data.habits.find(h => h.id === id);
     if (!habit) return;
+    const todayIndex = (new Date().getDay() + 6) % 7;
+    if (dayIndex === todayIndex && habit.days[dayIndex]) {
+      notify("Today's streak is already recorded.");
+      return;
+    }
     const checked = !habit.days[dayIndex];
     setData(d => ({
       ...d,
@@ -491,7 +496,7 @@ function HabitsPage({ data, onAdd, onToggle }) {
   return <>
     <SectionTitle eyebrow="SHOW UP FOR YOURSELF" title="Habits & streaks" description="Consistency is built in the ordinary moments. Track the little things." action={<button className="primary-button" onClick={onAdd}><Plus size={16}/> New habit</button>}/>
     <div className="habit-summary-grid"><div className="card habit-summary"><IconBox tone="amber"><Flame size={18}/></IconBox><span>Active streaks</span><strong>{data.habits.filter(h=>h.streak>0).length}</strong><small>habits you're building</small></div><div className="card habit-summary"><IconBox tone="mint"><CalendarCheck size={18}/></IconBox><span>Weekly check-ins</span><strong>{data.habits.reduce((s,h)=>s+h.days.reduce((a,b)=>a+b,0),0)}</strong><small>completed habit days</small></div><div className="card habit-summary"><IconBox tone="violet"><Trophy size={18}/></IconBox><span>Longest streak</span><strong>{Math.max(0,...data.habits.map(h=>h.streak))} <small>days</small></strong><small>keep building momentum</small></div></div>
-    <div className="habit-list">{data.habits.map(h=><div className="card habit-card" key={h.id}><div className="habit-card-head"><IconBox tone={h.color==="mint"?"mint":h.color==="orange"?"amber":"violet"}>{h.icon==="heart"?<Heart size={18}/>:h.icon==="star"?<Star size={18}/>:<BookOpen size={18}/>}</IconBox><div className="habit-info"><strong>{h.title}</strong><span>{h.streak} day streak · Daily habit</span></div><div className="habit-streak"><Flame size={15} fill="currentColor"/>{h.streak}</div><button className="primary-button small" onClick={()=>onToggle(h.id,todayIndex)}>{h.days[todayIndex] ? "Checked in" : "Check in"} <Check size={14}/></button></div><div className="habit-week"><span className="week-label">THIS WEEK</span>{["M","T","W","T","F","S","S"].map((d,i)=><button key={i} className={`habit-day ${h.days[i]?"checked":""}`} onClick={()=>onToggle(h.id,i)} title={`Toggle ${d}`}>{h.days[i]?<Check size={13}/>:d}</button>)}</div></div>)}</div>
+    <div className="habit-list">{data.habits.map(h=><div className="card habit-card" key={h.id}><div className="habit-card-head"><IconBox tone={h.color==="mint"?"mint":h.color==="orange"?"amber":"violet"}>{h.icon==="heart"?<Heart size={18}/>:h.icon==="star"?<Star size={18}/>:<BookOpen size={18}/>}</IconBox><div className="habit-info"><strong>{h.title}</strong><span>{h.streak} day streak · Daily habit</span></div><div className="habit-streak"><Flame size={15} fill="currentColor"/>{h.streak}</div><button className="primary-button small" disabled={Boolean(h.days[todayIndex])} onClick={h.days[todayIndex] ? undefined : ()=>onToggle(h.id,todayIndex)}>{h.days[todayIndex] ? "Checked in" : "Check in"} <Check size={14}/></button></div><div className="habit-week"><span className="week-label">THIS WEEK</span>{["M","T","W","T","F","S","S"].map((d,i)=><button key={i} className={`habit-day ${h.days[i]?"checked":""}`} disabled={i === todayIndex && Boolean(h.days[i])} onClick={i === todayIndex && h.days[i] ? undefined : ()=>onToggle(h.id,i)} title={`Toggle ${d}`}>{h.days[i]?<Check size={13}/>:d}</button>)}</div></div>)}</div>
     <div className="info-banner"><Sparkles size={18}/><div><strong>Progress over perfection</strong><p>A missed day doesn't erase the work you've done. Focus on your next small action.</p></div></div>
   </>;
 }
