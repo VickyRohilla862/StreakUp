@@ -260,8 +260,18 @@ export default function App() {
     notify("+8 XP · Today's streak recorded.");
   }
   function updateGoal(id, delta) {
-    setData(d => ({ ...d, goals: d.goals.map(g => g.id === id ? { ...g, progress: Math.min(100, Math.max(0, g.progress + delta)) } : g), xp: d.xp + (delta > 0 ? 5 : 0) }));
-    if (delta > 0) notify("+5 XP · Goal progress updated.");
+    let completed = false;
+    setData(d => ({
+      ...d,
+      goals: d.goals.map(g => {
+        if (g.id !== id) return g;
+        const progress = Math.min(100, g.progress + delta);
+        completed = g.progress < 100 && progress === 100 && !g.xpAwarded;
+        return { ...g, progress, xpAwarded: g.xpAwarded || completed };
+      }),
+      xp: completed ? d.xp + 10 : d.xp
+    }));
+    if (completed) notify("+10 XP · Goal completed.");
   }
   const activeCoachId = currentCoachId || coachConversations[0]?.id;
   const coachMessages = coachConversations.find(c => c.id === activeCoachId)?.messages || [];
@@ -434,8 +444,13 @@ export default function App() {
 }
 
 function Overview({ data, todayTasks, completedToday, completion, onPage, onAdd, onSetStreak, onToggle, onNotify }) {
+  const [progressMode, setProgressMode] = useState("tasks");
   const pending = todayTasks.filter(t=>!t.completed);
   const todayIndex = (new Date().getDay() + 6) % 7;
+  const completedGoals = data.goals.filter(g => g.progress === 100).length;
+  const goalCompletion = data.goals.length ? Math.round(completedGoals / data.goals.length * 100) : 0;
+  const showingGoals = progressMode === "goals";
+  const progressValue = showingGoals ? goalCompletion : completion;
   const hasStreakActivity = data.habits.some(h => h.streak > 0 || h.days?.some(Boolean));
   const hasTodaysStreak = data.habits.length > 0 && data.habits.every(h => h.days[todayIndex]);
   const hasRecordedActivity = data.completedTotal > 0 || hasStreakActivity || data.focusSessions > 0;
@@ -446,7 +461,7 @@ function Overview({ data, todayTasks, completedToday, completion, onPage, onAdd,
       <div className="hero-card">
         <div className="hero-orb orb-one"/><div className="hero-orb orb-two"/>
         <div className="hero-card-content"><div className="hero-kicker"><Sparkles size={15}/> YOUR DAILY MOMENTUM</div><h2>You're building<br/>something <em>good.</em></h2><p>Consistency isn't perfection. It's showing up again.</p><button className="hero-button" onClick={()=>onPage("Habits & streaks")}>View your streaks <ArrowRight size={15}/></button></div>
-        <div className="hero-progress"><div className="ring-wrap"><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="48" className="ring-track"/><circle cx="60" cy="60" r="48" className="ring-value" style={{strokeDasharray:`${completion*3.016} 301.6`}}/></svg><div className="ring-center"><strong>{completion}%</strong><span>DONE</span></div></div><div className="hero-progress-label"><strong>{completedToday} of {todayTasks.length}</strong><span>tasks completed</span><div className="tiny-dots"><i/><i/><i/><i/><i/></div></div></div>
+        <div className="hero-progress"><div className="ring-wrap"><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="48" className="ring-track"/><circle cx="60" cy="60" r="48" className="ring-value" style={{strokeDasharray:`${progressValue*3.016} 301.6`}}/></svg><div className="ring-center"><strong>{progressValue}%</strong><span>DONE</span></div></div><div className="hero-progress-label"><strong>{showingGoals ? `${completedGoals} of ${data.goals.length}` : `${completedToday} of ${todayTasks.length}`}</strong><span>{showingGoals ? "goals completed" : "tasks completed"}</span><div className="tiny-dots"><i className={!showingGoals ? "active" : ""}/><i className={showingGoals ? "active" : ""}/><button className="progress-switch" onClick={() => setProgressMode(showingGoals ? "tasks" : "goals")} aria-label={showingGoals ? "Show task completion" : "Show goal completion"} title={showingGoals ? "Show task completion" : "Show goal completion"}><ChevronRight size={13}/></button></div></div></div>
       </div>
       <div className="streak-highlight card">
         <div className="card-heading"><span className="eyebrow">STREAK SPOTLIGHT</span>{hasStreakActivity && <div className="streak-icon"><Flame size={18} fill="currentColor"/></div>}</div>
@@ -488,14 +503,37 @@ function TasksPage({ data, tasks, search, setSearch, onAddTask, onAddGoal, onTog
     <SectionTitle eyebrow="MAKE IT HAPPEN" title="Tasks & goals" description="Turn the things you want into small, doable next steps." action={<button className="primary-button" onClick={tab==="Tasks"?onAddTask:onAddGoal}><Plus size={16}/> {tab==="Tasks"?"New task":"New goal"}</button>}/>
     <div className="tab-bar"><button className={tab==="Tasks"?"selected":""} onClick={()=>setTab("Tasks")}>Tasks <span>{data.tasks.length}</span></button><button className={tab==="Goals"?"selected":""} onClick={()=>setTab("Goals")}>Goals <span>{data.goals.length}</span></button></div>
     {tab==="Tasks" ? <><div className="toolbar"><div className="search-box"><Search size={16}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search your tasks…"/></div><div className="toolbar-note"><CalendarDays size={15}/> {data.tasks.filter(t=>t.due==="Today"&&!t.completed).length} due today</div></div><div className="card full-list">{tasks.length ? tasks.map(t=><TaskRow key={t.id} task={t} onToggle={onToggle}/>) : <EmptyState title="No tasks found" text="Try another search or add a new task."/>}</div></>
-    : <div className="goals-grid">{data.goals.map(g=><div className="card goal-full-card" key={g.id}><div className="goal-card-top"><IconBox tone="violet"><Goal size={18}/></IconBox><Pill tone="purple">{g.horizon}</Pill></div><h3>{g.title}</h3><p>{g.target}</p><div className="goal-progress-line"><span>Progress</span><strong>{g.progress}%</strong></div><Progress value={g.progress}/><div className="goal-card-actions"><button className="secondary-button small" onClick={()=>onGoal(g.id,-5)}>−5%</button><button className="primary-button small" onClick={()=>onGoal(g.id,5)}>Add progress +5%</button></div></div>)}</div>}
+    : <div className="goals-grid">{data.goals.map(g=><div className="card goal-full-card" key={g.id}><div className="goal-card-top"><IconBox tone="violet"><Goal size={18}/></IconBox><Pill tone="purple">{g.horizon}</Pill></div><h3>{g.title}</h3><p>{g.target}</p><div className="goal-progress-line"><span>Progress</span><strong>{g.progress}%</strong></div><Progress value={g.progress}/><div className="goal-card-actions"><button className="primary-button small" disabled={g.progress === 100} onClick={()=>onGoal(g.id,100-g.progress)}>{g.progress === 100 ? "Completed" : "Complete goal"}</button></div></div>)}</div>}
   </>;
 }
 function HabitsPage({ data, onAdd, onToggle }) {
   const todayIndex = (new Date().getDay() + 6) % 7;
+  const overallStreak = (() => {
+    let count = 0;
+    for (let offset = 0; offset < 7; offset += 1) {
+      const dayIndex = (todayIndex - offset + 7) % 7;
+      if (!data.habits.some(h => h.days[dayIndex])) break;
+      count += 1;
+    }
+    return count;
+  })();
+  const highestStreak = (() => {
+    let highest = 0;
+    let current = 0;
+    for (let dayIndex = 0; dayIndex < 7; dayIndex += 1) {
+      if (data.habits.some(h => h.days[dayIndex])) {
+        current += 1;
+        highest = Math.max(highest, current);
+      } else {
+        current = 0;
+      }
+    }
+    return highest;
+  })();
+  const habitStreak = Math.max(0, ...data.habits.map(h => h.streak));
   return <>
     <SectionTitle eyebrow="SHOW UP FOR YOURSELF" title="Habits & streaks" description="Consistency is built in the ordinary moments. Track the little things." action={<button className="primary-button" onClick={onAdd}><Plus size={16}/> New habit</button>}/>
-    <div className="habit-summary-grid"><div className="card habit-summary"><IconBox tone="amber"><Flame size={18}/></IconBox><span>Active streaks</span><strong>{data.habits.filter(h=>h.streak>0).length}</strong><small>habits you're building</small></div><div className="card habit-summary"><IconBox tone="mint"><CalendarCheck size={18}/></IconBox><span>Weekly check-ins</span><strong>{data.habits.reduce((s,h)=>s+h.days.reduce((a,b)=>a+b,0),0)}</strong><small>completed habit days</small></div><div className="card habit-summary"><IconBox tone="violet"><Trophy size={18}/></IconBox><span>Longest streak</span><strong>{Math.max(0,...data.habits.map(h=>h.streak))} <small>days</small></strong><small>keep building momentum</small></div></div>
+    <div className="habit-summary-grid"><div className="card habit-summary"><IconBox tone="amber"><Flame size={18}/></IconBox><span>Overall streak</span><strong>{overallStreak} <small>days</small></strong><small>consecutive days showing up</small></div><div className="card habit-summary"><IconBox tone="violet"><Trophy size={18}/></IconBox><span>Habit streak</span><strong>{habitStreak} <small>days</small></strong><small>longest individual habit</small></div><div className="card habit-summary"><IconBox tone="mint"><CalendarCheck size={18}/></IconBox><span>Highest streak</span><strong>{highestStreak} <small>days</small></strong><small>longest overall streak in a row</small></div></div>
     <div className="habit-list">{data.habits.map(h=><div className="card habit-card" key={h.id}><div className="habit-card-head"><IconBox tone={h.color==="mint"?"mint":h.color==="orange"?"amber":"violet"}>{h.icon==="heart"?<Heart size={18}/>:h.icon==="star"?<Star size={18}/>:<BookOpen size={18}/>}</IconBox><div className="habit-info"><strong>{h.title}</strong><span>{h.streak} day streak · Daily habit</span></div><div className="habit-streak"><Flame size={15} fill="currentColor"/>{h.streak}</div><button className="primary-button small" disabled={Boolean(h.days[todayIndex])} onClick={h.days[todayIndex] ? undefined : ()=>onToggle(h.id,todayIndex)}>{h.days[todayIndex] ? "Checked in" : "Check in"} <Check size={14}/></button></div><div className="habit-week"><span className="week-label">THIS WEEK</span>{["M","T","W","T","F","S","S"].map((d,i)=><button key={i} className={`habit-day ${h.days[i]?"checked":""}`} disabled={i === todayIndex && Boolean(h.days[i])} onClick={i === todayIndex && h.days[i] ? undefined : ()=>onToggle(h.id,i)} title={`Toggle ${d}`}>{h.days[i]?<Check size={13}/>:d}</button>)}</div></div>)}</div>
     <div className="info-banner"><Sparkles size={18}/><div><strong>Progress over perfection</strong><p>A missed day doesn't erase the work you've done. Focus on your next small action.</p></div></div>
   </>;
