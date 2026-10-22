@@ -13,8 +13,10 @@ import {
   BarChart, Bar
 } from "recharts";
 
-const aiEndpoint = import.meta.env.VITE_AI_API_URL;
 const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
+const geminiModel = import.meta.env.VITE_GEMINI_MODEL || "gemini-3.8-flash";
+const groqModel = import.meta.env.VITE_GROQ_MODEL || "llama-3.3-70b-versatile";
+const openRouterModel = import.meta.env.VITE_OPENROUTER_MODEL || "openai/gpt-oss-120b";
 
 const initialState = {
   tasks: [], goals: [], habits: [],
@@ -35,6 +37,9 @@ const chartData = [];
 const storageKey = "streakup-state-v3";
 const demoSessionKey = "streakup-demo-session-v1";
 const coachStorageKey = "streakup-coach-conversations-v1";
+const providerKeysStorageKey = "streakup-ai-provider-keys-v1";
+const geminiRetryDelays = [1500, 3000, 6000];
+const maxAssistantCharacters = 4200;
 const fmtDate = (d = new Date()) => d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 const localDayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 const uid = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2,7)}`;
@@ -80,6 +85,16 @@ function loadCoachConversations() {
     return [createCoachConversation()];
   }
 }
+function loadProviderKeys(email) {
+  try {
+    const raw = email && localStorage.getItem(`${providerKeysStorageKey}:${email}`);
+    if (raw) return { gemini: "", groq: "", openrouter: "", tavily: "", youtube: "", ...JSON.parse(raw) };
+    const legacyGeminiKey = email && localStorage.getItem(`streakup-gemini-api-key-v1:${email}`);
+    return { gemini: legacyGeminiKey || "", groq: "", openrouter: "", tavily: "", youtube: "" };
+  } catch {
+    return { gemini: "", groq: "", openrouter: "", tavily: "", youtube: "" };
+  }
+}
 function IconBox({ children, tone = "violet", size = "md" }) {
   return <div className={`icon-box ${tone} ${size}`}>{children}</div>;
 }
@@ -99,6 +114,245 @@ function SectionTitle({ eyebrow, title, description, action }) {
 function Modal({ title, onClose, children, wide = false }) {
   return <div className="modal-backdrop" onMouseDown={e => e.target === e.currentTarget && onClose()}>
     <div className={`modal ${wide ? "wide" : ""}`}><div className="modal-head"><h3>{title}</h3><button className="icon-button" onClick={onClose}><X size={18}/></button></div>{children}</div>
+  </div>;
+}
+function renderInlineMarkdown(text) {
+  const tokenPattern = /(\*\*[^*]+\*\*|__[^_]+__|(?<!\*)\*[^*]+\*(?!\*)|(?<!_)_[^_]+_(?!_)|`[^`]+`|\[[^\]]+\]\(https?:\/\/[^)\s]+\)|https?:\/\/[^\s<>"')\]]+)/g;
+  return text.split(tokenPattern).map((token, index) => {
+    if (!token) return null;
+    if (token.startsWith("**") || token.startsWith("__")) return <strong key={index}>{token.slice(2, -2)}</strong>;
+    if ((token.startsWith("*") && token.endsWith("*")) || (token.startsWith("_") && token.endsWith("_"))) return <em key={index}>{token.slice(1, -1)}</em>;
+    if (token.startsWith("`")) return <code key={index}>{token.slice(1, -1)}</code>;
+    if (token.startsWith("[")) {
+      const match = token.match(/^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/);
+      if (match) return <a key={index} href={match[2]} target="_blank" rel="noreferrer">{match[1]}</a>;
+    }
+    if (/^https?:\/\//i.test(token)) {
+      const url = token.replace(/[.,!?;:]+$/, "");
+      return <a key={index} href={url} target="_blank" rel="noreferrer">{url}</a>;
+    }
+    return <React.Fragment key={index}>{token}</React.Fragment>;
+  });
+}
+function normalizeMath(text) {
+  return text
+    .replace(/\${1,2}/g, "")
+    .replace(/\\text\s*\{([^{}]*)\}/g, "$1")
+    .replace(/\\mathrm\s*\{([^{}]*)\}/g, "$1")
+    .replace(/\\rightarrow|\\to/g, "→")
+    .replace(/\\left|\\right/g, "")
+    .replace(/\\times/g, "×")
+    .replace(/\\cdot/g, "·")
+    .replace(/\\pm/g, "±")
+    .replace(/\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, "$1/$2")
+    .replace(/\\([a-zA-Z]+)/g, "$1")
+    .replace(/\^\s*\{([^{}]*)\}/g, "^$1")
+    .replace(/_\s*\{([^{}]*)\}/g, "_$1")
+    .replace(/[{}]/g, "")
+    .replace(/\\+/g, "")
+    .replace(/[ \t]+/g, " ")
+    .trim();
+}
+function parseAssistantResponse(text) {
+  const resourceMatch = text.match(/\[RESOURCES\]\s*([\s\S]*?)\s*\[\/RESOURCES\]/i);
+  let resources = [];
+  if (resourceMatch) {
+    try {
+      const parsed = JSON.parse(resourceMatch[1]);
+      resources = Array.isArray(parsed.items) ? parsed.items.filter(item =>
+        item && ["image", "video", "link"].includes(item.type) &&
+        typeof item.title === "string" && /^https?:\/\//i.test(item.url)
+      ).slice(0, 5) : [];
+    } catch {
+      resources = [];
+    }
+    function getInteractionText(result) {
+      if (typeof result.output_text === "string") return result.output_text.trim();
+      const output = Array.isArray(result.output) ? result.output : [];
+      return output.flatMap(item => {
+        if (item.type === "text" && typeof item.text === "string") return [item.text];
+        if (item.type === "model_output" && Array.isArray(item.content)) {
+          return item.content.filter(content => content.type === "text" && typeof content.text === "string").map(content => content.text);
+        }
+        function limitAssistantResponse(text) {
+          if (text.length <= maxAssistantCharacters) return text;
+          const cutoff = text.slice(0, maxAssistantCharacters);
+          const sentenceEnd = Math.max(cutoff.lastIndexOf(". "), cutoff.lastIndexOf("! "), cutoff.lastIndexOf("? "), cutoff.lastIndexOf("\n"));
+          return `${cutoff.slice(0, sentenceEnd > 300 ? sentenceEnd + 1 : maxAssistantCharacters).trim()}…`;
+        }
+        return [];
+      }).join("").trim();
+    }
+    function wantsResources(prompt) {
+      return /\b(latest|recent|current|today|news|source|research|diagram|image|visual|video|watch|tutorial|learn)\b/i.test(prompt);
+    }
+    async function searchWebResources(prompt, keys) {
+      if (!keys.tavily || !wantsResources(prompt)) return [];
+      const response = await fetch("https://api.tavily.com/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: keys.tavily, query: prompt, search_depth: "basic", max_results: 4, include_images: true })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || `Tavily returned HTTP ${response.status}.`);
+      const links = (result.results || []).slice(0, 4).map(item => ({ type: "link", title: item.title, url: item.url }));
+      const images = (result.images || []).slice(0, 2).map(url => ({ type: "image", title: "Related image", url }));
+      return [...images, ...links];
+    }
+    async function searchYouTubeResources(prompt, key) {
+      if (!key || !wantsResources(prompt)) return [];
+      const params = new URLSearchParams({ part: "snippet", q: prompt, maxResults: "3", type: "video", key });
+      const response = await fetch(`https://www.googleapis.com/youtube/v3/search?${params}`);
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error?.message || `YouTube returned HTTP ${response.status}.`);
+      return (result.items || []).map(item => ({
+        type: "video",
+        title: item.snippet?.title || "Related video",
+        url: `https://www.youtube.com/watch?v=${item.id.videoId}`
+      }));
+    }
+    async function callTextProvider(provider, key, model, input) {
+      if (provider === "gemini") {
+        const response = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+          body: JSON.stringify({ model, input, tools: [{ type: "google_search" }] })
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error?.message || `Google AI returned HTTP ${response.status}.`);
+        return getInteractionText(result);
+      }
+      const baseUrl = provider === "groq" ? "https://api.groq.com/openai/v1/chat/completions" : "https://openrouter.ai/api/v1/chat/completions";
+      const response = await fetch(baseUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}`, ...(provider === "openrouter" ? { "HTTP-Referer": window.location.origin, "X-Title": "StreakUp" } : {}) },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: input }], temperature: 0.7, max_tokens: 600 })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error?.message || `${provider} returned HTTP ${response.status}.`);
+      return result.choices?.[0]?.message?.content?.trim() || "";
+    }
+  }
+  return {
+    text: text.replace(/\[RESOURCES\][\s\S]*?\[\/RESOURCES\]/i, "").trim(),
+    resources
+  };
+}
+function getInteractionText(result) {
+  if (typeof result.output_text === "string") return result.output_text.trim();
+  const output = Array.isArray(result.output) ? result.output : [];
+  return output.flatMap(item => {
+    if (item.type === "text" && typeof item.text === "string") return [item.text];
+    if (item.type === "model_output" && Array.isArray(item.content)) {
+      return item.content.filter(content => content.type === "text" && typeof content.text === "string").map(content => content.text);
+    }
+    return [];
+  }).join("").trim();
+}
+function limitAssistantResponse(text) {
+  if (text.length <= maxAssistantCharacters) return text;
+  const cutoff = text.slice(0, maxAssistantCharacters);
+  const sentenceEnd = Math.max(cutoff.lastIndexOf(". "), cutoff.lastIndexOf("! "), cutoff.lastIndexOf("? "), cutoff.lastIndexOf("\n"));
+  return `${cutoff.slice(0, sentenceEnd > 300 ? sentenceEnd + 1 : maxAssistantCharacters).trim()}…`;
+}
+function callTextProvider(provider, key, model, input) {
+  if (provider === "gemini") {
+    return fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+      body: JSON.stringify({ model, input, tools: [{ type: "google_search" }] })
+    }).then(async response => {
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error?.message || `Google AI returned HTTP ${response.status}.`);
+      return getInteractionText(result);
+    });
+  }
+  const baseUrl = provider === "groq"
+    ? "https://api.groq.com/openai/v1/chat/completions"
+    : "https://openrouter.ai/api/v1/chat/completions";
+  return fetch(baseUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${key}`,
+      ...(provider === "openrouter" ? { "HTTP-Referer": window.location.origin, "X-Title": "StreakUp" } : {})
+    },
+    body: JSON.stringify({ model, messages: [{ role: "user", content: input }], temperature: 0.7, max_tokens: 1200 })
+  }).then(async response => {
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error?.message || `${provider} returned HTTP ${response.status}.`);
+    return result.choices?.[0]?.message?.content?.trim() || "";
+  });
+}
+function MarkdownMessage({ text }) {
+  const lines = normalizeMath(text).replace(/\r\n/g, "\n").split("\n");
+  const blocks = [];
+  let list = [];
+  let listType = "";
+  let table = [];
+  const flushList = () => {
+    if (!list.length) return;
+    const List = listType === "ordered" ? "ol" : "ul";
+    blocks.push(<List key={`list-${blocks.length}`}>{list.map((item, index) => <li key={index}>{renderInlineMarkdown(item)}</li>)}</List>);
+    list = [];
+    listType = "";
+  };
+  const flushTable = () => {
+    if (table.length < 2) {
+      table.forEach((row, index) => blocks.push(<p key={`table-fallback-${blocks.length}-${index}`}>{renderInlineMarkdown(row)}</p>));
+      table = [];
+      return;
+    }
+    const header = table[0];
+    const rows = table.slice(1);
+    blocks.push(<div className="chat-table-wrap" key={`table-${blocks.length}`}><table><thead><tr>{header.map((cell, index) => <th key={index}>{renderInlineMarkdown(cell)}</th>)}</tr></thead><tbody>{rows.map((row, rowIndex) => <tr key={rowIndex}>{header.map((_, cellIndex) => <td key={cellIndex}>{renderInlineMarkdown(row[cellIndex] || "")}</td>)}</tr>)}</tbody></table></div>);
+    table = [];
+  };
+  const isTableRow = line => /^\s*\|.*\|\s*$/.test(line);
+  const isTableSeparator = line => /^\s*\|(?:\s*:?-+:?\s*\|)+\s*$/.test(line);
+  const parseTableRow = line => line.trim().replace(/^\||\|$/g, "").split("|").map(cell => cell.trim());
+  lines.forEach((line, index) => {
+    const heading = line.match(/^\s{0,3}(#{1,3})\s+(.+)$/);
+    const unordered = line.match(/^\s*[-*]\s+(.+)$/);
+    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (isTableRow(line)) {
+      if (isTableSeparator(line)) return;
+      flushList();
+      table.push(parseTableRow(line));
+    } else if (table.length) {
+      flushTable();
+      if (heading) {
+        const Heading = `h${heading[1].length}`;
+        blocks.push(<Heading key={`heading-${index}`}>{renderInlineMarkdown(heading[2])}</Heading>);
+      } else if (line.trim()) {
+        blocks.push(<p key={`paragraph-${index}`}>{renderInlineMarkdown(line)}</p>);
+      }
+    } else if (heading) {
+      flushList();
+      const Heading = `h${heading[1].length}`;
+      blocks.push(<Heading key={`heading-${index}`}>{renderInlineMarkdown(heading[2])}</Heading>);
+    } else if (unordered || ordered) {
+      const nextType = unordered ? "unordered" : "ordered";
+      if (listType && listType !== nextType) flushList();
+      listType = nextType;
+      list.push((unordered || ordered)[1]);
+    } else {
+      flushList();
+      if (line.trim()) blocks.push(<p key={`paragraph-${index}`}>{renderInlineMarkdown(line)}</p>);
+    }
+  });
+  flushList();
+  flushTable();
+  return <div className="markdown-message">{blocks}</div>;
+}
+function AssistantResources({ resources }) {
+  if (!resources?.length) return null;
+  return <div className="assistant-resources">
+    <div className="assistant-resources-title">Helpful resources</div>
+    <div className="assistant-resource-list">{resources.map((resource, index) => <a className="assistant-resource" href={resource.url} target="_blank" rel="noreferrer" key={`${resource.url}-${index}`}>
+      {resource.type === "image" ? <img src={resource.url} alt="" loading="lazy" onError={event => { event.currentTarget.style.display = "none"; }}/> : <span className={`resource-icon ${resource.type}`}>{resource.type === "video" ? "▶" : "↗"}</span>}
+      <span><strong>{resource.title}</strong><small>{resource.type === "video" ? "Watch video" : resource.type === "image" ? "View diagram" : "Open resource"}</small></span>
+    </a>)}</div>
   </div>;
 }
 
@@ -122,6 +376,10 @@ export default function App() {
   const [currentCoachId, setCurrentCoachId] = useState(null);
   const [coachInput, setCoachInput] = useState("");
   const [coachStreaming, setCoachStreaming] = useState(null);
+  const [coachRequesting, setCoachRequesting] = useState(false);
+  const [providerKeys, setProviderKeys] = useState({ gemini: "", groq: "", openrouter: "", tavily: "", youtube: "" });
+  const [providerKeyDraft, setProviderKeyDraft] = useState({ gemini: "", groq: "", openrouter: "", tavily: "", youtube: "" });
+  const [showProviderSetup, setShowProviderSetup] = useState(false);
   const [accountForm, setAccountForm] = useState({ email: "", name: "" });
 
   useEffect(() => { localStorage.setItem(storageKey, JSON.stringify(data)); }, [data]);
@@ -154,6 +412,9 @@ export default function App() {
     const timer = setTimeout(() => setToast(""), 2800);
     return () => clearTimeout(timer);
   }, [toast]);
+  useEffect(() => {
+    if (page === "AI coach" && !providerKeys.gemini && !providerKeys.groq && !providerKeys.openrouter) setShowProviderSetup(true);
+  }, [page, providerKeys]);
   const notify = (msg) => setToast(msg);
   const todayTasks = data.tasks.filter(t => t.due === "Today");
   const completedToday = todayTasks.filter(t => t.completed).length;
@@ -165,6 +426,11 @@ export default function App() {
     if (user) setAccountForm({ email: user.email || "", name: user.user_metadata?.full_name || "" });
   }, [user]);
   useEffect(() => {
+    const keys = loadProviderKeys(user?.email);
+    setProviderKeys(keys);
+    setProviderKeyDraft(keys);
+  }, [user]);
+  useEffect(() => {
     window.handleGoogleCredential = credentialResponse => {
       try {
         const payload = JSON.parse(window.atob(credentialResponse.credential.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
@@ -172,6 +438,7 @@ export default function App() {
         localStorage.setItem(demoSessionKey, JSON.stringify(session));
         setUser(session);
         setAuthModal(false);
+        setShowProviderSetup(true);
         notify("Signed in with Google.");
       } catch (error) {
         console.error("Google sign-in response could not be read.", error);
@@ -304,6 +571,24 @@ export default function App() {
   function toggleCoachPin(id) {
     setCoachConversations(conversations => conversations.map(conversation => conversation.id === id ? { ...conversation, pinned: !conversation.pinned } : conversation));
   }
+  function saveProviderKeys(e) {
+    e.preventDefault();
+    const nextKeys = Object.fromEntries(Object.entries(providerKeyDraft).map(([name, key]) => [name, key.trim()]));
+    if (!nextKeys.gemini && !nextKeys.groq && !nextKeys.openrouter) return notify("Add at least one AI provider key.");
+    localStorage.setItem(`${providerKeysStorageKey}:${user.email}`, JSON.stringify(nextKeys));
+    setProviderKeys(nextKeys);
+    setProviderKeyDraft(nextKeys);
+    setShowProviderSetup(false);
+    notify("AI provider settings saved in this browser.");
+  }
+  function removeProviderKeys() {
+    localStorage.removeItem(`${providerKeysStorageKey}:${user.email}`);
+    const emptyKeys = { gemini: "", groq: "", openrouter: "", tavily: "", youtube: "" };
+    setProviderKeys(emptyKeys);
+    setProviderKeyDraft(emptyKeys);
+    setShowProviderSetup(true);
+    notify("AI provider keys removed.");
+  }
   async function signOut() {
     localStorage.removeItem(demoSessionKey);
     setUser(null); setProfileMenu(false); notify("Signed out.");
@@ -329,49 +614,77 @@ export default function App() {
   async function sendCoach(e) {
     e.preventDefault();
     const q = coachInput.trim(); if (!q) return;
-    const lower = q.toLowerCase();
+    if (!providerKeys.gemini && !providerKeys.groq && !providerKeys.openrouter) {
+      setShowProviderSetup(true);
+      return notify("Add at least one AI provider key before starting a chat.");
+    }
+    setCoachRequesting(true);
     let answer = "";
-    if (lower.includes("plan") || lower.includes("schedule") || lower.includes("today")) {
-      const pending = data.tasks.filter(t => !t.completed && t.due === "Today");
-      const mins = pending.reduce((s,t) => s + (Number(t.minutes)||25), 0);
-      answer = `You have ${pending.length} unfinished task${pending.length === 1 ? "" : "s"} planned for today (${mins} estimated minutes). Start with one high-priority task, then take a short break. If the full list feels too heavy, choose the most important 2–3 tasks and reschedule the rest deliberately.`;
-    } else if (lower.includes("miss") || lower.includes("behind") || lower.includes("stuck") || lower.includes("consisten")) {
-      answer = `Your current consistency score is ${data.consistency}/100 and you have ${data.habits.reduce((s,h)=>s+h.streak,0)} combined habit-streak days across your habits. Try a 10-minute restart: pick one small task, define what “done” means, and complete it before planning anything else. One missed day is data, not a verdict.`;
-    } else if (lower.includes("weak") || lower.includes("pattern") || lower.includes("review")) {
-      const total = data.tasks.length, done = data.tasks.filter(t=>t.completed).length;
-      answer = `From the tasks currently saved here, ${done} of ${total} are marked complete (${total ? Math.round(done/total*100) : 0}%). This is a snapshot, not enough data to infer a reliable long-term pattern. For the next week, record estimated versus actual time and note when you postpone tasks; then we can make a better evidence-based adjustment.`;
-    } else {
-      answer = `Let's make this concrete. Your saved plan contains ${data.tasks.filter(t=>!t.completed).length} unfinished tasks and ${data.goals.length} goals. Choose one outcome you want this week, break it into a 15–30 minute action, and schedule that action at a realistic time.`;
-    }
-    if (aiEndpoint) {
+    try {
+      const context = JSON.stringify({
+        tasks: data.tasks,
+        goals: data.goals,
+        habits: data.habits,
+        consistency: data.consistency
+      });
+      const conversation = coachMessages.map(({ role, text }) => `${role === "assistant" ? "Assistant" : "User"}: ${text}`).join("\n\n");
+      let resources = [];
       try {
-        const headers = { "Content-Type": "application/json" };
-        const response = await fetch(aiEndpoint, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            message: q,
-            conversation: coachMessages.map(({ role, text }) => ({ role, content: text })),
-            context: { tasks: data.tasks, goals: data.goals, habits: data.habits, consistency: data.consistency },
-            webSearch: true,
-            provider: "google-grounding"
-          })
-        });
-        if (!response.ok) throw new Error(`AI service returned HTTP ${response.status}.`);
-        const result = await response.json();
-        if (typeof result.answer !== "string" || !result.answer.trim()) throw new Error("AI service returned no answer.");
-        answer = result.answer.trim();
-      } catch (error) {
-        console.error("AI coach request failed.", error);
-        notify("Live AI is unavailable, so a local coaching reply was used.");
+        resources = [...await searchWebResources(q, providerKeys), ...await searchYouTubeResources(q, providerKeys.youtube)];
+      } catch (resourceError) {
+        console.warn("Optional resource search failed.", resourceError);
       }
+      const input = `You are Momentum, a capable and warm general-purpose AI assistant inside StreakUp. Answer any reasonable question, including studies, work, business, household problems, planning, relationships, and everyday decisions. Analyze the prompt first and do not force every answer into productivity or consistency advice. When the question is about consistency, habits, goals, or follow-through, give practical real-world guidance beyond this website. Use StreakUp context only when it helps. Be honest about uncertainty, avoid pretending to be a professional, and give safe, actionable steps. Keep the answer concise: use at most 6 short paragraphs or bullets and aim for under 450 words. Finish every sentence before stopping; prioritize the most useful points and do not pad the answer. When a comparison or schedule is clearer as a table, use standard Markdown table syntax with a header row and separator row, such as | Topic | Advice | followed by | --- | --- |.
+
+Use current web information when the supplied resources are relevant. Do not invent citations or URLs. If resources are supplied, mention them naturally where useful.
+
+StreakUp context: ${context}
+Optional live resources: ${JSON.stringify(resources)}
+Conversation:
+${conversation}
+
+User: ${q}`;
+      const providers = [
+        ["gemini", providerKeys.gemini, geminiModel],
+        ["groq", providerKeys.groq, groqModel],
+        ["openrouter", providerKeys.openrouter, openRouterModel]
+      ].filter(([, key]) => key);
+      let lastError;
+      for (const [provider, key, model] of providers) {
+        try {
+          answer = await callTextProvider(provider, key, model, input);
+          if (answer) break;
+        } catch (providerError) {
+          lastError = providerError;
+          console.warn(`${provider} request failed; trying the next provider.`, providerError);
+        }
+      }
+      if (!answer && lastError) throw lastError;
+      if (!answer) throw new Error("Google AI returned an empty response.");
+      const parsed = parseAssistantResponse(answer);
+      parsed.resources = [...parsed.resources, ...resources].slice(0, 6);
+      answer = limitAssistantResponse(parsed.text);
+      var responseResources = parsed.resources;
+    } catch (error) {
+      console.error("Google AI coach request failed.", error);
+      const message = error instanceof Error ? error.message : "Google AI is unavailable.";
+      notify(/quota exceeded/i.test(message)
+        ? message
+        : /high demand|overload|temporarily unavailable|try again later/i.test(message)
+        ? "Google AI is temporarily busy. Please try again in a moment."
+        : message);
+      return;
+    } finally {
+      setCoachRequesting(false);
     }
+    const parsedAnswer = parseAssistantResponse(answer);
+    parsedAnswer.resources = typeof responseResources === "undefined" ? parsedAnswer.resources : responseResources;
     const userMessage = { id: uid(), role: "user", text: q };
-    const assistantMessage = { id: uid(), role: "assistant", text: "" };
+    const assistantMessage = { id: uid(), role: "assistant", text: "", resources: parsedAnswer.resources };
     setCoachConversations(conversations => conversations.map(conversation => conversation.id === activeCoachId
       ? { ...conversation, title: conversation.title === "New conversation" ? q.slice(0, 42) : conversation.title, updatedAt: Date.now(), messages: [...conversation.messages, userMessage, assistantMessage] }
       : conversation));
-    setCoachStreaming({ conversationId: activeCoachId, messageId: assistantMessage.id, text: answer, index: 0 });
+    setCoachStreaming({ conversationId: activeCoachId, messageId: assistantMessage.id, text: parsedAnswer.text, index: 0 });
     setCoachInput("");
   }
   function finishFocus() {
@@ -455,7 +768,7 @@ export default function App() {
         {page === "Tasks & goals" && <TasksPage data={data} tasks={filteredTasks} search={search} setSearch={setSearch} onAddTask={() => setAddModal("task")} onAddGoal={() => setAddModal("goal")} onToggle={updateTask} onGoal={updateGoal} />}
         {page === "Habits & streaks" && <HabitsPage data={data} onAdd={() => setAddModal("habit")} onToggle={toggleHabit} />}
         {page === "Focus room" && <FocusPage seconds={focusSeconds} setSeconds={setFocusSeconds} running={focusRunning} setRunning={setFocusRunning} started={focusStarted} setStarted={setFocusStarted} mode={focusMode} setMode={setFocusMode} task={focusTask} setTask={setFocusTask} tasks={data.tasks} onFinish={finishFocus} data={data} />}
-        {page === "AI coach" && <CoachPage messages={coachMessages} input={coachInput} setInput={setCoachInput} onSend={sendCoach} data={data} conversations={coachConversations} currentId={activeCoachId} onSelect={id => setCurrentCoachId(id)} onNew={newCoachConversation} onDelete={deleteCoachConversation} onPin={toggleCoachPin} isTyping={Boolean(coachStreaming)} />}
+        {page === "AI coach" && <CoachPage messages={coachMessages} input={coachInput} setInput={setCoachInput} onSend={sendCoach} data={data} conversations={coachConversations} currentId={activeCoachId} onSelect={id => setCurrentCoachId(id)} onNew={newCoachConversation} onDelete={deleteCoachConversation} onPin={toggleCoachPin} isTyping={Boolean(coachStreaming) || coachRequesting} hasApiKey={Boolean(providerKeys.gemini || providerKeys.groq || providerKeys.openrouter)} onOpenApiKeySetup={() => setShowProviderSetup(true)} onRemoveApiKey={removeProviderKeys} />}
         {page === "Analytics" && <AnalyticsPage data={data} />}
         {page === "Accountability" && <AccountabilityPage data={data} setData={setData} onNotify={notify} />}
         {page === "Settings" && <SettingsPage data={data} setData={setData} onNotify={notify} user={user} accountForm={accountForm} setAccountForm={setAccountForm} onSaveName={saveAccountName} onSignOut={signOut} onDeleteAccount={deleteAccount} />}
@@ -463,6 +776,7 @@ export default function App() {
       <footer className="footer"><span>STREAKUP © {new Date().getFullYear()}</span><span>Progress over perfection <span className="footer-heart">♥</span></span></footer>
     </main>
     {addModal && <AddModal type={addModal} onClose={() => setAddModal(null)} onTask={addTask} onGoal={addGoal} onHabit={addHabit}/>}
+    {showProviderSetup && <ProviderSetupModal keys={providerKeyDraft} setKeys={setProviderKeyDraft} onSave={saveProviderKeys} onClose={() => setShowProviderSetup(false)} />}
     {authModal && <Modal title={user ? "Your account" : "Welcome to StreakUp"} onClose={() => setAuthModal(false)}>
       {user && <div className="auth-note"><ShieldCheck size={18}/> Signed in as <strong>{user.email}</strong></div>}
       {user ? <button type="button" className="primary-button full" onClick={() => setAuthModal(false)}>Done</button> : googleClientId ? <div id="google-signin-button" className="google-signin-button"/> : <div className="demo-warning"><CircleHelp size={16}/> Google Sign-In is not configured.</div>}
@@ -578,11 +892,38 @@ function FocusPage({ seconds, setSeconds, running, setRunning, started, setStart
       <div className="focus-side"><div className="card focus-task-select"><div className="eyebrow">FOCUS ON</div><h3>Choose your task</h3><p>Give this session a purpose.</p><select value={task} onChange={e=>setTask(e.target.value)}><option value="">No task selected</option>{tasks.filter(t=>!t.completed).map(t=><option value={t.id} key={t.id}>{t.title}</option>)}</select><div className="focus-tip"><Sparkles size={16}/><span>Try one focus session before checking messages or switching tasks.</span></div></div><div className="card focus-stats"><div className="eyebrow">YOUR FOCUS TOTALS</div><div className="focus-stat-row"><IconBox tone="violet"><Timer size={17}/></IconBox><div><strong>{data.focusSessions}</strong><span>Sessions completed</span></div></div><div className="focus-stat-row"><IconBox tone="blue"><Clock3 size={17}/></IconBox><div><strong>{formatDuration(data.focusTimeSeconds ?? data.focusMinutes * 60)}</strong><span>Total focused time</span></div></div></div></div></div>
   </>;
 }
-function CoachPage({ messages, input, setInput, onSend, data, conversations, currentId, onSelect, onNew, onDelete, onPin, isTyping }) {
-  const prompts = ["Help me plan today","I keep falling behind","Review my recent patterns"];
+function ProviderSetupModal({ keys, setKeys, onSave, onClose }) {
+  const [instructionsFor, setInstructionsFor] = useState(null);
+  const providers = [
+    ["gemini", "Google Gemini", "Gemini API key"],
+    ["groq", "Groq", "Groq API key"],
+    ["openrouter", "OpenRouter", "OpenRouter API key"],
+    ["tavily", "Tavily Search", "Tavily search key"],
+    ["youtube", "YouTube Data API", "YouTube Data API key"]
+  ];
+  const instructions = {
+    gemini: { title: "Google Gemini API key", steps: ["Open Google AI Studio.", "Sign in with Google.", "Select Create API key.", "Choose a Google Cloud project and create the key.", "Copy the key and paste it into the Gemini field."] , url: "https://aistudio.google.com/app/apikey" },
+    groq: { title: "Groq API key", steps: ["Open the Groq Console.", "Sign in or create an account.", "Open API Keys.", "Select Create API key and give it a name.", "Copy the key and paste it into the Groq field."], url: "https://console.groq.com/keys" },
+    openrouter: { title: "OpenRouter API key", steps: ["Open OpenRouter.", "Sign in or create an account.", "Open the Keys page.", "Select Create Key.", "Copy the key and paste it into the OpenRouter field."], url: "https://openrouter.ai/keys" },
+    tavily: { title: "Tavily Search API key", steps: ["Open Tavily.", "Create an account or sign in.", "Open your API dashboard.", "Copy your API key.", "Paste it into the Tavily Search field to enable live web resources."], url: "https://tavily.com/" },
+    youtube: { title: "YouTube Data API key", steps: ["Open Google Cloud Console.", "Create or select a project.", "Enable YouTube Data API v3.", "Open APIs & Services → Credentials and select Create credentials → API key.", "Copy the key and paste it into the YouTube field."], url: "https://console.cloud.google.com/apis/credentials" }
+  };
+  return <Modal title="Connect AI providers" onClose={onClose} wide>
+    <div className="api-key-setup">
+      <p>Connect one or more AI providers. StreakUp tries Gemini first, then Groq, then OpenRouter if a provider is unavailable. Search and YouTube keys add optional live resources when they help answer a question.</p>
+      <div className="provider-key-list">{providers.map(([id, name, placeholder]) => <label className="provider-key-row" key={id}><span><strong>{name}</strong><button type="button" className="instruction-button" onClick={() => setInstructionsFor(id)}>Instructions</button></span><input type="password" value={keys[id]} onChange={e => setKeys(current => ({ ...current, [id]: e.target.value }))} placeholder={placeholder} autoComplete="off"/></label>)}</div>
+      {instructionsFor && <div className="provider-instructions"><div className="provider-instructions-head"><strong>{instructions[instructionsFor].title}</strong><button type="button" className="icon-button" onClick={() => setInstructionsFor(null)}><X size={15}/></button></div><ol>{instructions[instructionsFor].steps.map(step => <li key={step}>{step}</li>)}</ol><a href={instructions[instructionsFor].url} target="_blank" rel="noreferrer">Open official provider page <ArrowUpRight size={13}/></a></div>}
+      <form onSubmit={onSave}><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button">Save provider keys</button></div></form>
+      <small className="api-key-warning">Keys are saved in this browser for this account. Add only the providers you want to use.</small>
+    </div>
+  </Modal>;
+}
+function CoachPage({ messages, input, setInput, onSend, data, conversations, currentId, onSelect, onNew, onDelete, onPin, isTyping, hasApiKey, onOpenApiKeySetup, onRemoveApiKey }) {
+  const [historyVisible, setHistoryVisible] = useState(true);
+  const prompts = ["Help me plan today","I keep falling behind","I have a problem at work"];
   return <>
-    <SectionTitle eyebrow="A LITTLE MORE CLARITY" title="Your AI coach" description="Practical guidance based on your goals, tasks and progress."/>
-    <div className="coach-layout"><div className="card coach-history"><div className="coach-history-head"><div className="eyebrow">CHAT HISTORY</div><button className="primary-button small" onClick={onNew}><Plus size={14}/> New chat</button></div><div className="coach-history-list">{[...conversations].sort((a,b)=>Number(b.pinned)-Number(a.pinned)||b.updatedAt-a.updatedAt).map(conversation=><div className={`coach-history-item ${conversation.id===currentId?"selected":""}`} key={conversation.id}><button onClick={()=>onSelect(conversation.id)}><span>{conversation.pinned && "PIN · "}{conversation.title}</span><small>{conversation.messages.filter(m=>m.role==="user").length} messages</small></button><div><button className="icon-button" title={conversation.pinned?"Unpin chat":"Pin chat"} onClick={()=>onPin(conversation.id)}>★</button><button className="icon-button" title="Delete chat" onClick={()=>onDelete(conversation.id)}><X size={14}/></button></div></div>)}</div></div><div className="card coach-chat"><div className="chat-head"><div className="coach-avatar"><BrainCircuit size={20}/></div><div><strong>Momentum</strong><span><i/> {isTyping ? "Writing…" : "Ready to help"}</span></div><Pill tone="purple">PERSONAL COACH</Pill></div><div className="chat-messages">{messages.map(m=><div key={m.id} className={`chat-message ${m.role}`}><div className="chat-bubble">{m.text}{isTyping && m.role==="assistant" && !m.text && <span className="typing-dots">...</span>}</div></div>)}</div><div className="suggested-prompts">{prompts.map(p=><button key={p} onClick={()=>setInput(p)}>{p} <ArrowUpRight size={12}/></button>)}</div><form className="chat-input-row" onSubmit={onSend}><input value={input} onChange={e=>setInput(e.target.value)} placeholder="Ask about your goals, study, business, or anything else…"/><button className="send-button" aria-label="Send message" disabled={isTyping}><Send size={17}/></button></form><div className="chat-disclaimer">Prototype coaching uses local rules. Connect a secure server-side AI provider and web-search tool for broader, current answers.</div></div><div className="coach-side"><div className="card insight-card"><div className="insight-icon"><Sparkles size={18}/></div><div className="eyebrow">A STARTING INSIGHT</div><h3>Make the next step smaller.</h3><p>You have {data.tasks.filter(t=>!t.completed).length} unfinished tasks. Pick one that takes 15–25 minutes and begin there.</p></div><div className="card coach-context"><div className="eyebrow">YOUR CURRENT SNAPSHOT</div><div><span>Consistency score</span><strong>{data.consistency}%</strong></div><Progress value={data.consistency}/><div><span>Goals in progress</span><strong>{data.goals.length}</strong></div><div><span>Active habits</span><strong>{data.habits.length}</strong></div><div><span>Unfinished tasks</span><strong>{data.tasks.filter(t=>!t.completed).length}</strong></div></div></div></div>
+    <SectionTitle eyebrow="A LITTLE MORE CLARITY" title="Your AI coach" description="Ask about consistency, studies, work, business, home, or anything else." action={<button className="secondary-button small" onClick={onOpenApiKeySetup}>{hasApiKey ? "Change Google AI key" : "Add Google AI key"}</button>}/>
+    <div className={`coach-layout ${historyVisible ? "" : "history-hidden"}`}>{historyVisible && <div className="card coach-history"><div className="coach-history-head"><div className="eyebrow">CHAT HISTORY</div><div className="coach-history-actions"><button className="primary-button small" onClick={onNew}><Plus size={14}/> New chat</button><button className="icon-button" title="Hide chat history" aria-label="Hide chat history" onClick={()=>setHistoryVisible(false)}><ChevronLeft size={16}/></button></div></div><div className="coach-history-list">{[...conversations].sort((a,b)=>Number(b.pinned)-Number(a.pinned)||b.updatedAt-a.updatedAt).map(conversation=><div className={`coach-history-item ${conversation.id===currentId?"selected":""}`} key={conversation.id}><button onClick={()=>onSelect(conversation.id)}><span>{conversation.pinned && "PIN · "}{conversation.title}</span><small>{conversation.messages.filter(m=>m.role==="user").length} messages</small></button><div><button className="icon-button" title={conversation.pinned?"Unpin chat":"Pin chat"} onClick={()=>onPin(conversation.id)}>★</button><button className="icon-button" title="Delete chat" onClick={()=>onDelete(conversation.id)}><X size={14}/></button></div></div>)}</div></div>}<div className="card coach-chat"><div className="chat-head">{!historyVisible && <button className="icon-button" title="Show chat history" aria-label="Show chat history" onClick={()=>setHistoryVisible(true)}><ChevronRight size={16}/></button>}<div className="coach-avatar"><BrainCircuit size={20}/></div><div><strong>Momentum</strong><span><i/> {isTyping ? "Working…" : "Ready to help"}</span></div><Pill tone="purple">MULTI-PROVIDER AI</Pill></div><div className="chat-messages">{messages.map(m=><div key={m.id} className={`chat-message ${m.role}`}><div className="chat-bubble">{m.role === "assistant" ? <><MarkdownMessage text={m.text}/><AssistantResources resources={m.resources}/></> : m.text}{isTyping && m.role==="assistant" && !m.text && <span className="typing-dots">...</span>}</div></div>)}</div><div className="suggested-prompts">{prompts.map(p=><button key={p} onClick={()=>setInput(p)}>{p} <ArrowUpRight size={12}/></button>)}</div><form className="chat-input-row" onSubmit={onSend}><input value={input} onChange={e=>setInput(e.target.value)} placeholder="Ask anything…"/><button className="send-button" aria-label="Send message" disabled={isTyping || !hasApiKey}><Send size={17}/></button></form><div className="chat-disclaimer">{hasApiKey ? "AI routing uses your saved provider keys with live search when configured." : "Connect an AI provider to start chatting."} <button className="inline-link" onClick={onOpenApiKeySetup}>{hasApiKey ? "Manage providers" : "Set up now"}</button>{hasApiKey && <button className="inline-link" onClick={onRemoveApiKey}>Remove keys</button>}</div></div><div className="coach-side"><div className="card insight-card"><div className="insight-icon"><Sparkles size={18}/></div><div className="eyebrow">A STARTING INSIGHT</div><h3>Make the next step smaller.</h3><p>You have {data.tasks.filter(t=>!t.completed).length} unfinished tasks. Pick one that takes 15–25 minutes and begin there.</p></div><div className="card coach-context"><div className="eyebrow">YOUR CURRENT SNAPSHOT</div><div><span>Consistency score</span><strong>{data.consistency}%</strong></div><Progress value={data.consistency}/><div><span>Goals in progress</span><strong>{data.goals.length}</strong></div><div><span>Active habits</span><strong>{data.habits.length}</strong></div><div><span>Unfinished tasks</span><strong>{data.tasks.filter(t=>!t.completed).length}</strong></div></div></div></div>
   </>;
 }
 function AnalyticsPage({ data }) {
