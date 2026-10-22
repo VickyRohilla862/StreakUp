@@ -36,19 +36,17 @@ This is a functional frontend prototype, not yet a production-grade multi-user s
 
 - Accounts, workspace data, and chat history are stored in the browser. They persist across refreshes on the same device but do not provide secure authentication or cross-device sync.
 - Email and account identity are managed by Google; there is no local password or OTP flow.
-- AI Coach uses deterministic local rules unless `VITE_AI_API_URL` points to an existing server endpoint. The endpoint receives `{ message, conversation, context, webSearch: true, provider: "google-grounding" }` and must return `{ answer }`. The server should call Gemini with Google Search grounding, enforce authentication and authorization, and never expose provider keys in frontend variables.
+- AI Coach uses Google Gemini directly from the browser. Each signed-in user is asked for a Google AI Studio API key the first time they open the chat. The key is stored in that browser's `localStorage` and is sent directly to Google's Gemini API. This is convenient for a prototype but is not a secure production key-management approach.
 - Some weekly charts are illustrative sample data; the analytics screen labels this limitation.
 - Habit check-in editing is a prototype interaction; production streak calculations must use dated check-ins, the user's time zone, and idempotent server-side rules.
 - Social circles are local-only until membership, invitation, and authorization flows are implemented.
 - The current starter score logic is intentionally simple and should be replaced with a server-side score-event ledger before public launch.
 
-## Configure the AI endpoint
+## Configure Google Gemini for the AI Coach
 
-1. Copy `.env.example` to `.env.local`.
-2. Set `VITE_AI_API_URL` to an HTTPS backend endpoint.
-3. Restart the Vite server.
+The user-facing setup flow can configure Google Gemini, Groq, OpenRouter, Tavily Search, and YouTube Data API keys. The router tries Gemini, then Groq, then OpenRouter. Tavily and YouTube are optional resource providers used for current links, images, and videos when a prompt benefits from them. This is a browser-side prototype; move keys behind a backend before public launch.
 
-The endpoint receives `{ message, conversation, context, webSearch: true, provider: "google-grounding" }` and must return `{ answer }`. Keep Gemini or other private provider keys on the backend, never in frontend variables.
+To use a different Gemini model, optionally set `VITE_GEMINI_MODEL` in `.env.local` and restart the Vite server. For production, replace browser-side key storage with an authenticated backend proxy, server-side secret storage, usage limits, and key rotation.
 
 ## Configure Google Sign-In
 

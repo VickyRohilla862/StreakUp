@@ -4,6 +4,7 @@ import App from "./App.jsx";
 import "./styles.css";
 import "./sidebar-scroll.css";
 import "./ui-scale.css";
+import "./ai-coach.css";
 
 createRoot(document.getElementById("root")).render(
   <React.StrictMode><App /></React.StrictMode>
