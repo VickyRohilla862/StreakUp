@@ -19,7 +19,7 @@ const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
 const initialState = {
   tasks: [], goals: [], habits: [],
   xp: 0, consistency: 0, level: 1, completedTotal: 0, missed: 0,
-  focusSessions: 0, focusMinutes: 0, scoreEvents: [], history: {}, circles: [],
+  focusSessions: 0, focusMinutes: 0, focusTimeSeconds: 0, scoreEvents: [], history: {}, circles: [],
   challenges: [], settings: { reminders: true, theme: "dark", graceDays: 1, weekStarts: "Monday" }
 };
 const nav = [
@@ -38,13 +38,22 @@ const coachStorageKey = "streakup-coach-conversations-v1";
 const fmtDate = (d = new Date()) => d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 const localDayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 const uid = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2,7)}`;
+const formatDuration = totalSeconds => {
+  const seconds = Math.max(0, Math.floor(totalSeconds || 0));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainder = seconds % 60;
+  return `${hours}h ${minutes}m ${remainder}s`;
+};
 
 function loadLocal() {
   try {
     localStorage.removeItem("streakup-state-v1");
     localStorage.removeItem("streakup-state-v2");
     const raw = localStorage.getItem(storageKey);
-    return raw ? { ...initialState, ...JSON.parse(raw) } : initialState;
+    if (!raw) return initialState;
+    const saved = JSON.parse(raw);
+    return { ...initialState, ...saved, focusTimeSeconds: saved.focusTimeSeconds ?? (saved.focusMinutes || 0) * 60 };
   } catch { return initialState; }
 }
 function loadDemoSession() {
@@ -106,6 +115,7 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [focusSeconds, setFocusSeconds] = useState(25 * 60);
   const [focusRunning, setFocusRunning] = useState(false);
+  const [focusStarted, setFocusStarted] = useState(false);
   const [focusMode, setFocusMode] = useState("Focus");
   const [focusTask, setFocusTask] = useState("");
   const [coachConversations, setCoachConversations] = useState(loadCoachConversations);
@@ -232,16 +242,17 @@ export default function App() {
   }
   function setTodaysStreak() {
     const todayIndex = (new Date().getDay() + 6) % 7;
-    if (data.habits.length && data.habits.every(h => h.days[todayIndex])) {
+    const todaysHabit = data.habits.find(h => h.title === "Today's streak");
+    if (todaysHabit?.days[todayIndex]) {
       notify("Today's streak is already recorded.");
       return;
     }
     setData(d => {
-      const habit = d.habits.find(h => !h.days[todayIndex]);
-      if (habit) {
+      const existingTodaysHabit = d.habits.find(h => h.title === "Today's streak");
+      if (existingTodaysHabit) {
         return {
           ...d,
-          habits: d.habits.map(h => h.id === habit.id
+          habits: d.habits.map(h => h.id === existingTodaysHabit.id
             ? { ...h, days: h.days.map((day, index) => index === todayIndex ? 1 : day), streak: h.streak + 1 }
             : h),
           xp: d.xp + 8
@@ -364,9 +375,26 @@ export default function App() {
     setCoachInput("");
   }
   function finishFocus() {
+    if (!focusStarted) {
+      notify("Start a focus session before logging time.");
+      return;
+    }
+    if (focusMode !== "Focus") {
+      notify("Focus time can only be logged in Focus mode.");
+      return;
+    }
+    const elapsedSeconds = Math.max(0, 25 * 60 - focusSeconds);
     setFocusRunning(false);
-    setData(d => ({ ...d, focusSessions: d.focusSessions + 1, focusMinutes: d.focusMinutes + (focusMode === "Focus" ? 25 : 5), xp: d.xp + 15 }));
-    notify("+15 XP · Focus session logged.");
+    setFocusStarted(false);
+    setData(d => ({
+      ...d,
+      focusSessions: d.focusSessions + (elapsedSeconds >= 25 * 60 ? 1 : 0),
+      focusMinutes: Math.floor((d.focusTimeSeconds + elapsedSeconds) / 60),
+      focusTimeSeconds: d.focusTimeSeconds + elapsedSeconds,
+      xp: d.xp + 15
+    }));
+    setFocusSeconds(25 * 60);
+    notify(`Focus session logged · ${formatDuration(elapsedSeconds)} recorded.`);
   }
 
   const filteredTasks = useMemo(() => data.tasks.filter(t => `${t.title} ${t.category}`.toLowerCase().includes(search.toLowerCase())), [data.tasks, search]);
@@ -426,7 +454,7 @@ export default function App() {
         {page === "Overview" && <Overview data={data} todayTasks={todayTasks} completedToday={completedToday} completion={completion} onPage={setPage} onAdd={() => setAddModal("task")} onSetStreak={setTodaysStreak} onToggle={updateTask} onNotify={notify} />}
         {page === "Tasks & goals" && <TasksPage data={data} tasks={filteredTasks} search={search} setSearch={setSearch} onAddTask={() => setAddModal("task")} onAddGoal={() => setAddModal("goal")} onToggle={updateTask} onGoal={updateGoal} />}
         {page === "Habits & streaks" && <HabitsPage data={data} onAdd={() => setAddModal("habit")} onToggle={toggleHabit} />}
-        {page === "Focus room" && <FocusPage seconds={focusSeconds} setSeconds={setFocusSeconds} running={focusRunning} setRunning={setFocusRunning} mode={focusMode} setMode={setFocusMode} task={focusTask} setTask={setFocusTask} tasks={data.tasks} onFinish={finishFocus} data={data} />}
+        {page === "Focus room" && <FocusPage seconds={focusSeconds} setSeconds={setFocusSeconds} running={focusRunning} setRunning={setFocusRunning} started={focusStarted} setStarted={setFocusStarted} mode={focusMode} setMode={setFocusMode} task={focusTask} setTask={setFocusTask} tasks={data.tasks} onFinish={finishFocus} data={data} />}
         {page === "AI coach" && <CoachPage messages={coachMessages} input={coachInput} setInput={setCoachInput} onSend={sendCoach} data={data} conversations={coachConversations} currentId={activeCoachId} onSelect={id => setCurrentCoachId(id)} onNew={newCoachConversation} onDelete={deleteCoachConversation} onPin={toggleCoachPin} isTyping={Boolean(coachStreaming)} />}
         {page === "Analytics" && <AnalyticsPage data={data} />}
         {page === "Accountability" && <AccountabilityPage data={data} setData={setData} onNotify={notify} />}
@@ -452,9 +480,10 @@ function Overview({ data, todayTasks, completedToday, completion, onPage, onAdd,
   const showingGoals = progressMode === "goals";
   const progressValue = showingGoals ? goalCompletion : completion;
   const hasStreakActivity = data.habits.some(h => h.streak > 0 || h.days?.some(Boolean));
-  const hasTodaysStreak = data.habits.length > 0 && data.habits.every(h => h.days[todayIndex]);
+  const hasTodaysStreak = data.habits.some(h => h.title === "Today's streak" && h.days[todayIndex]);
   const hasRecordedActivity = data.completedTotal > 0 || hasStreakActivity || data.focusSessions > 0;
-  const hasFocusActivity = data.focusSessions > 0 || data.focusMinutes > 0;
+  const focusTimeSeconds = data.focusTimeSeconds ?? data.focusMinutes * 60;
+  const hasFocusActivity = data.focusSessions > 0 || focusTimeSeconds > 0;
   return <>
     <div className="welcome-row"><div><div className="eyebrow"><span className="live-dot"/> YOUR SPACE TO GROW</div><h1>Make today <span>count.</span></h1><p>Small, consistent actions add up. Let's make progress today.</p></div><button className="primary-button" onClick={onAdd}><Plus size={17}/> Add a task</button></div>
     <div className="hero-grid">
@@ -474,7 +503,7 @@ function Overview({ data, todayTasks, completedToday, completion, onPage, onAdd,
       <StatCard label="Consistency score" value={`${data.consistency}%`} sub="Your reliability index" icon={Activity} tone="violet" trend={hasRecordedActivity ? <span className="stat-neutral">Tracking</span> : <span className="stat-neutral">No data yet</span>}/>
       <StatCard label="Total experience" value={data.xp.toLocaleString()} sub={`Level ${data.level} · ${Math.max(0,500-(data.xp%500))} XP to next level`} icon={Zap} tone="amber"/>
       <StatCard label="Tasks completed" value={data.completedTotal} sub="Every small win counts" icon={CheckCheck} tone="mint"/>
-      <StatCard label="Focus time" value={`${Math.floor(data.focusMinutes/60)}h ${data.focusMinutes%60}m`} sub={`${data.focusSessions} sessions logged`} icon={Clock3} tone="blue"/>
+      <StatCard label="Focus time" value={formatDuration(focusTimeSeconds)} sub={`${data.focusSessions} sessions logged`} icon={Clock3} tone="blue"/>
     </div>
     <div className="content-grid">
       <section className="card task-card"><div className="card-heading"><div><div className="eyebrow">YOUR PRIORITIES</div><h3>Today's tasks <span className="count-badge">{pending.length} left</span></h3></div><button className="icon-button" onClick={()=>onPage("Tasks & goals")}><ArrowRight size={18}/></button></div>
@@ -538,14 +567,15 @@ function HabitsPage({ data, onAdd, onToggle }) {
     <div className="info-banner"><Sparkles size={18}/><div><strong>Progress over perfection</strong><p>A missed day doesn't erase the work you've done. Focus on your next small action.</p></div></div>
   </>;
 }
-function FocusPage({ seconds, setSeconds, running, setRunning, mode, setMode, task, setTask, tasks, onFinish, data }) {
+function FocusPage({ seconds, setSeconds, running, setRunning, started, setStarted, mode, setMode, task, setTask, tasks, onFinish, data }) {
   const modes = [{name:"Focus",seconds:1500},{name:"Short break",seconds:300},{name:"Long break",seconds:900}];
   const mins = String(Math.floor(seconds/60)).padStart(2,"0"), secs = String(seconds%60).padStart(2,"0");
   const progress = 1 - seconds / (modes.find(m=>m.name===mode)?.seconds || 1500);
+  const canLogSession = mode === "Focus" && started;
   return <>
     <SectionTitle eyebrow="ONE THING AT A TIME" title="Focus room" description="Protect a little time for the work that matters."/>
-    <div className="focus-layout"><div className="card focus-main"><div className="focus-mode-tabs">{modes.map(m=><button className={mode===m.name?"selected":""} key={m.name} onClick={()=>{setMode(m.name);setSeconds(m.seconds);setRunning(false);}}>{m.name}</button>)}</div><div className="timer-outer"><svg viewBox="0 0 300 300"><circle cx="150" cy="150" r="130" className="timer-track"/><circle cx="150" cy="150" r="130" className="timer-progress" style={{strokeDasharray:`${progress*816.8} 816.8`}}/></svg><div className="timer-inner"><span className="timer-label">{mode==="Focus"?"TIME TO FOCUS":"TAKE A BREATHER"}</span><strong>{mins}:{secs}</strong><span className="timer-task-label">{task ? tasks.find(t=>t.id===task)?.title : "Choose a task below"}</span></div></div><div className="timer-controls"><button className="primary-button timer-start" onClick={()=>{if(seconds===0)setSeconds(modes.find(m=>m.name===mode).seconds);setRunning(!running);}}>{running?<Pause size={17}/>:<Play size={17} fill="currentColor"/>}{running?"Pause session":"Start session"}</button><button className="secondary-button" onClick={()=>{setRunning(false);setSeconds(modes.find(m=>m.name===mode).seconds);}}><RotateCcw size={16}/></button>{seconds===0&&<button className="secondary-button" onClick={onFinish}>Log session</button>}</div><div className="focus-footnote"><ShieldCheck size={14}/> You don't need a perfect day. Just a focused next step.</div></div>
-      <div className="focus-side"><div className="card focus-task-select"><div className="eyebrow">FOCUS ON</div><h3>Choose your task</h3><p>Give this session a purpose.</p><select value={task} onChange={e=>setTask(e.target.value)}><option value="">No task selected</option>{tasks.filter(t=>!t.completed).map(t=><option value={t.id} key={t.id}>{t.title}</option>)}</select><div className="focus-tip"><Sparkles size={16}/><span>Try one focus session before checking messages or switching tasks.</span></div></div><div className="card focus-stats"><div className="eyebrow">YOUR FOCUS TOTALS</div><div className="focus-stat-row"><IconBox tone="violet"><Timer size={17}/></IconBox><div><strong>{data.focusSessions}</strong><span>Sessions completed</span></div></div><div className="focus-stat-row"><IconBox tone="blue"><Clock3 size={17}/></IconBox><div><strong>{Math.floor(data.focusMinutes/60)}h {data.focusMinutes%60}m</strong><span>Total focused time</span></div></div></div></div></div>
+    <div className="focus-layout"><div className="card focus-main"><div className="focus-mode-tabs">{modes.map(m=><button className={mode===m.name?"selected":""} key={m.name} onClick={()=>{setMode(m.name);setSeconds(m.seconds);setRunning(false);setStarted(false);}}>{m.name}</button>)}</div><div className="timer-outer"><svg viewBox="0 0 300 300"><circle cx="150" cy="150" r="130" className="timer-track"/><circle cx="150" cy="150" r="130" className="timer-progress" style={{strokeDasharray:`${progress*816.8} 816.8`}}/></svg><div className="timer-inner"><span className="timer-label">{mode==="Focus"?"TIME TO FOCUS":"TAKE A BREATHER"}</span><strong>{mins}:{secs}</strong><span className="timer-task-label">{task ? tasks.find(t=>t.id===task)?.title : "Choose a task below"}</span></div></div><div className="timer-controls"><button className="primary-button timer-start" onClick={()=>{if(seconds===0)setSeconds(modes.find(m=>m.name===mode).seconds);setStarted(true);setRunning(!running);}}>{running?<Pause size={17}/>:<Play size={17} fill="currentColor"/>}{running?"Pause session":"Start session"}</button><button className="secondary-button" onClick={()=>{setRunning(false);setStarted(false);setSeconds(modes.find(m=>m.name===mode).seconds);}}><RotateCcw size={16}/></button><button className="secondary-button" disabled={!canLogSession} onClick={onFinish}>Log session</button></div><div className="focus-footnote"><ShieldCheck size={14}/> You don't need a perfect day. Just a focused next step.</div></div>
+      <div className="focus-side"><div className="card focus-task-select"><div className="eyebrow">FOCUS ON</div><h3>Choose your task</h3><p>Give this session a purpose.</p><select value={task} onChange={e=>setTask(e.target.value)}><option value="">No task selected</option>{tasks.filter(t=>!t.completed).map(t=><option value={t.id} key={t.id}>{t.title}</option>)}</select><div className="focus-tip"><Sparkles size={16}/><span>Try one focus session before checking messages or switching tasks.</span></div></div><div className="card focus-stats"><div className="eyebrow">YOUR FOCUS TOTALS</div><div className="focus-stat-row"><IconBox tone="violet"><Timer size={17}/></IconBox><div><strong>{data.focusSessions}</strong><span>Sessions completed</span></div></div><div className="focus-stat-row"><IconBox tone="blue"><Clock3 size={17}/></IconBox><div><strong>{formatDuration(data.focusTimeSeconds ?? data.focusMinutes * 60)}</strong><span>Total focused time</span></div></div></div></div></div>
   </>;
 }
 function CoachPage({ messages, input, setInput, onSend, data, conversations, currentId, onSelect, onNew, onDelete, onPin, isTyping }) {
