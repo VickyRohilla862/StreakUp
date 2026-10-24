@@ -20,12 +20,21 @@
 .chat-disclaimer .inline-link+ .inline-link{margin-left:auto}
 .markdown-message{display:grid;gap:8px}
 .markdown-message p{margin:0}
-.markdown-message h1,.markdown-message h2,.markdown-message h3{margin:4px 0 0;color:#f4f2fc;font-family:Manrope,sans-serif;line-height:1.3}
+.markdown-message h1,.markdown-message h2,.markdown-message h3,.markdown-message h4,.markdown-message h5,.markdown-message h6{margin:4px 0 0;color:#f4f2fc;font-family:Manrope,sans-serif;line-height:1.3}
 .markdown-message h1{font-size:18px}.markdown-message h2{font-size:16px}.markdown-message h3{font-size:14px}
+.markdown-message h4{font-size:13px}.markdown-message h5{font-size:12px}.markdown-message h6{font-size:11px}
 .markdown-message ul,.markdown-message ol{margin:0;padding-left:22px}
 .markdown-message li{padding-left:3px;margin:2px 0}
 .markdown-message strong{color:#fff;font-weight:700}.markdown-message em{color:#d5caff}
 .markdown-message code,.chat-math{padding:2px 5px;border-radius:4px;background:#0b0b1288;color:#d2c5ff;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em}
+.code-block{max-width:100%;overflow:hidden;border:1px solid #ffffff12;border-radius:8px;background:#0b0b12}
+.code-block-toolbar{display:flex;align-items:center;justify-content:space-between;padding:6px 9px;border-bottom:1px solid #ffffff12;color:#89859c;font:10px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:lowercase}
+.code-block-toolbar button{display:inline-flex;align-items:center;gap:5px;border:1px solid #ffffff16;border-radius:5px;background:#ffffff08;color:#c9c2d8;padding:4px 7px;font-size:10px;cursor:pointer}
+.code-block-toolbar button:hover{background:#a58bff18;color:#f2edff}
+.code-block pre{margin:0;max-width:100%;overflow:auto;padding:11px 12px;color:#d9d2ed;white-space:pre-wrap;overflow-wrap:anywhere}
+.markdown-message pre code{padding:0;background:transparent;white-space:pre-wrap}
+.markdown-message pre .syntax-comment{color:#718096}.markdown-message pre .syntax-string{color:#9ae6b4}.markdown-message pre .syntax-number{color:#f6ad55}.markdown-message pre .syntax-keyword{color:#c4b5fd;font-weight:600}.markdown-message pre .syntax-function{color:#7dd3fc}
+.markdown-message blockquote{margin:0;padding:8px 12px;border-left:3px solid #a58bff;color:#c8c1da;background:#a58bff0b}
 .markdown-message a{color:#b9a8ff;text-decoration:underline}
 .chat-table-wrap{max-width:100%;overflow-x:auto;border:1px solid #ffffff12;border-radius:8px}
 .chat-table-wrap table{width:100%;min-width:420px;border-collapse:collapse;font-size:11px;text-align:left}
@@ -38,6 +47,10 @@
 .assistant-resource{display:flex;align-items:center;gap:9px;min-width:0;padding:8px;border:1px solid #ffffff12;border-radius:8px;background:#ffffff05;color:#d8d2e8;text-decoration:none}
 .assistant-resource:hover{background:#a58bff12;border-color:#a58bff40}
 .assistant-resource img{width:42px;height:36px;object-fit:cover;border-radius:5px;background:#0b0b12}
+.visual-resources .assistant-resource-list{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.visual-resources .assistant-resource{display:grid;align-content:start;gap:8px;padding:10px}
+.visual-resources .assistant-resource img{width:100%;height:150px;border-radius:7px}
+.visual-resources .assistant-resource>span:last-child{gap:4px}
 .assistant-resource>span:last-child{display:grid;gap:3px;min-width:0}
 .assistant-resource strong{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .assistant-resource small{font-size:9px;color:#89859c}
@@ -54,6 +67,11 @@
 .markdown-message pre{max-width:100%;overflow-x:auto;white-space:pre-wrap}
 .markdown-message code{overflow-wrap:anywhere}
 .assistant-resources{min-width:0;max-width:100%}
+.response-action{display:inline-flex;align-items:center;gap:5px;margin-top:10px;border:1px solid #ffffff16;border-radius:7px;background:#ffffff06;color:#aaa4bd;padding:6px 9px;font-size:10px;cursor:pointer}
+.response-action:hover:not(:disabled){border-color:#a58bff55;background:#a58bff12;color:#d7ceff}
+.response-action:disabled{cursor:not-allowed;opacity:.45}
+.form-stack textarea{width:100%;min-width:0;resize:vertical;border:1px solid #ffffff15;background:#0e0e16;border-radius:8px;padding:11px 12px;color:#f2effb;font:11px Manrope,sans-serif;outline:0}
+.form-stack textarea:focus,.form-stack input:focus{border-color:#a58bff66;box-shadow:0 0 0 3px #a58bff12}
 @media (max-width:600px){
   .chat-head{flex-wrap:wrap;gap:8px;padding:12px}
   .chat-head>div:not(.coach-avatar){flex:1 1 calc(100% - 90px)}

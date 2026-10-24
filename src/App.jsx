@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity, AlarmClock, ArrowDownRight, ArrowRight, ArrowUpRight, Award,
   BarChart3, Bell, BookOpen, BrainCircuit, CalendarDays, Check, CheckCheck,
@@ -6,7 +6,7 @@ import {
   Goal, House, LogOut, Menu, Moon, MoreHorizontal, Plus, Search, Settings,
   ShieldCheck, Sparkles, Star, Target, Timer, Trophy, Users, WandSparkles,
   X, Zap, ListTodo, CalendarCheck, LockKeyhole, Mail, Play, Pause, RotateCcw,
-  TrendingUp, Heart, Sun, Coffee, Send, CircleUserRound
+  TrendingUp, Heart, Sun, Coffee, Send, CircleUserRound, Copy
 } from "lucide-react";
 import {
   Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -39,7 +39,11 @@ const demoSessionKey = "streakup-demo-session-v1";
 const coachStorageKey = "streakup-coach-conversations-v1";
 const providerKeysStorageKey = "streakup-ai-provider-keys-v1";
 const geminiRetryDelays = [1500, 3000, 6000];
-const maxAssistantCharacters = 4200;
+const maxAssistantCharacters = 5000;
+const visualRequestPattern = /\b(flowchart|flow chart|diagram|illustration|visual|mind map|concept map|architecture diagram|process map|infographic|image|picture|chart)\b/i;
+const codingRequestPattern = /\b(code|coding|program|script|function|写|python|javascript|java|html|css|sql|snippet|implement|write a)\b/i;
+const largeProjectPattern = /\b(app|application|website|web app|platform|backend|api|production|enterprise|full[- ]stack|multiple files|folder structure|scalable|architecture|database|authentication|deployment|team project)\b/i;
+const simpleProgramPattern = /\b(add|sum|subtract|minus|multiply|divide|average|hello world|print|even|odd|factorial|convert|calculate|calculator|two numbers|two values)\b/i;
 const fmtDate = (d = new Date()) => d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 const localDayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 const uid = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2,7)}`;
@@ -117,6 +121,7 @@ function Modal({ title, onClose, children, wide = false }) {
   </div>;
 }
 function renderInlineMarkdown(text) {
+  if (typeof text !== "string") return null;
   const tokenPattern = /(\*\*[^*]+\*\*|__[^_]+__|(?<!\*)\*[^*]+\*(?!\*)|(?<!_)_[^_]+_(?!_)|`[^`]+`|\[[^\]]+\]\(https?:\/\/[^)\s]+\)|https?:\/\/[^\s<>"')\]]+)/g;
   return text.split(tokenPattern).map((token, index) => {
     if (!token) return null;
@@ -135,6 +140,7 @@ function renderInlineMarkdown(text) {
   });
 }
 function normalizeMath(text) {
+  if (typeof text !== "string") return "";
   return text
     .replace(/\${1,2}/g, "")
     .replace(/\\text\s*\{([^{}]*)\}/g, "$1")
@@ -152,6 +158,14 @@ function normalizeMath(text) {
     .replace(/\\+/g, "")
     .replace(/[ \t]+/g, " ")
     .trim();
+}
+function wantsVisualResource(prompt) {
+  return visualRequestPattern.test(prompt);
+}
+function getCodingScope(prompt) {
+  if (!codingRequestPattern.test(prompt)) return "general";
+  if (simpleProgramPattern.test(prompt) && !largeProjectPattern.test(prompt)) return "simple";
+  return largeProjectPattern.test(prompt) ? "project" : "small";
 }
 function parseAssistantResponse(text) {
   const resourceMatch = text.match(/\[RESOURCES\]\s*([\s\S]*?)\s*\[\/RESOURCES\]/i);
@@ -175,6 +189,7 @@ function parseAssistantResponse(text) {
           return item.content.filter(content => content.type === "text" && typeof content.text === "string").map(content => content.text);
         }
         function limitAssistantResponse(text) {
+          if (typeof text !== "string") return "";
           if (text.length <= maxAssistantCharacters) return text;
           const cutoff = text.slice(0, maxAssistantCharacters);
           const sentenceEnd = Math.max(cutoff.lastIndexOf(". "), cutoff.lastIndexOf("! "), cutoff.lastIndexOf("? "), cutoff.lastIndexOf("\n"));
@@ -184,7 +199,7 @@ function parseAssistantResponse(text) {
       }).join("").trim();
     }
     function wantsResources(prompt) {
-      return /\b(latest|recent|current|today|news|source|research|diagram|image|visual|video|watch|tutorial|learn)\b/i.test(prompt);
+      return /\b(latest|recent|current|today|news|source|research|diagram|image|visual|video|watch|tutorial|learn|flowchart|flow chart|mind map|infographic|architecture)\b/i.test(prompt);
     }
     async function searchWebResources(prompt, keys) {
       if (!keys.tavily || !wantsResources(prompt)) return [];
@@ -196,7 +211,7 @@ function parseAssistantResponse(text) {
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail || `Tavily returned HTTP ${response.status}.`);
       const links = (result.results || []).slice(0, 4).map(item => ({ type: "link", title: item.title, url: item.url }));
-      const images = (result.images || []).slice(0, 2).map(url => ({ type: "image", title: "Related image", url }));
+      const images = (result.images || []).slice(0, wantsVisualResource(prompt) ? 4 : 2).map(url => ({ type: "image", title: "Related image", url }));
       return [...images, ...links];
     }
     async function searchYouTubeResources(prompt, key) {
@@ -226,7 +241,7 @@ function parseAssistantResponse(text) {
       const response = await fetch(baseUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}`, ...(provider === "openrouter" ? { "HTTP-Referer": window.location.origin, "X-Title": "StreakUp" } : {}) },
-        body: JSON.stringify({ model, messages: [{ role: "user", content: input }], temperature: 0.7, max_tokens: 600 })
+        body: JSON.stringify({ model, messages: [{ role: "user", content: input }], temperature: 0.7, max_tokens: 900 })
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error?.message || `${provider} returned HTTP ${response.status}.`);
@@ -237,6 +252,66 @@ function parseAssistantResponse(text) {
     text: text.replace(/\[RESOURCES\][\s\S]*?\[\/RESOURCES\]/i, "").trim(),
     resources
   };
+}
+function wantsResources(prompt) {
+  return /\b(latest|recent|current|today|news|source|research|diagram|image|visual|video|watch|tutorial|learn|flowchart|flow chart|mind map|infographic|architecture)\b/i.test(prompt);
+}
+async function searchWikimediaImages(prompt) {
+  const query = wantsVisualResource(prompt) ? `${prompt} diagram flowchart` : prompt;
+  const params = new URLSearchParams({
+    action: "query",
+    generator: "search",
+    gsrsearch: query,
+    gsrnamespace: "6",
+    gsrlimit: "4",
+    prop: "imageinfo",
+    iiprop: "url",
+    iiurlwidth: "900",
+    format: "json",
+    origin: "*"
+  });
+  const response = await fetch(`https://commons.wikimedia.org/w/api.php?${params}`);
+  const result = await response.json();
+  if (!response.ok) throw new Error(`Wikimedia image search returned HTTP ${response.status}.`);
+  return Object.values(result.query?.pages || [])
+    .map(item => ({
+      type: "image",
+      title: item.title?.replace(/^File:/, "") || "Related diagram",
+      url: item.imageinfo?.[0]?.thumburl || item.imageinfo?.[0]?.url
+    }))
+    .filter(item => /^https:\/\//i.test(item.url || ""));
+}
+async function searchWebResources(prompt, keys) {
+  if (!wantsResources(prompt)) return [];
+  if (keys.tavily) {
+    try {
+      const response = await fetch("https://api.tavily.com/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: keys.tavily, query: prompt, search_depth: "basic", max_results: 4, include_images: true })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || `Tavily returned HTTP ${response.status}.`);
+      const links = (result.results || []).slice(0, 4).map(item => ({ type: "link", title: item.title, url: item.url }));
+      const images = (result.images || []).slice(0, wantsVisualResource(prompt) ? 4 : 2).map(url => ({ type: "image", title: "Related image", url }));
+      if (images.length || links.length) return [...images, ...links];
+    } catch (error) {
+      console.warn("Tavily image search failed; trying Wikimedia Commons.", error);
+    }
+  }
+  return searchWikimediaImages(prompt);
+}
+async function searchYouTubeResources(prompt, key) {
+  if (!key || !wantsResources(prompt)) return [];
+  const params = new URLSearchParams({ part: "snippet", q: prompt, maxResults: "3", type: "video", key });
+  const response = await fetch(`https://www.googleapis.com/youtube/v3/search?${params}`);
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error?.message || `YouTube returned HTTP ${response.status}.`);
+  return (result.items || []).map(item => ({
+    type: "video",
+    title: item.snippet?.title || "Related video",
+    url: `https://www.youtube.com/watch?v=${item.id.videoId}`
+  }));
 }
 function getInteractionText(result) {
   if (typeof result.output_text === "string") return result.output_text.trim();
@@ -254,6 +329,42 @@ function limitAssistantResponse(text) {
   const cutoff = text.slice(0, maxAssistantCharacters);
   const sentenceEnd = Math.max(cutoff.lastIndexOf(". "), cutoff.lastIndexOf("! "), cutoff.lastIndexOf("? "), cutoff.lastIndexOf("\n"));
   return `${cutoff.slice(0, sentenceEnd > 300 ? sentenceEnd + 1 : maxAssistantCharacters).trim()}…`;
+}
+function highlightCode(source, language = "") {
+  const tokenPattern = /(\/\/[^\n]*|#[^\n]*|\/\*[\s\S]*?\*\/|(["'`])(?:\\.|(?!\2)[^\\])*\2|\b\d+(?:\.\d+)?\b|\b(?:function|return|const|let|var|if|else|for|while|class|new|import|from|export|async|await|def|in|print|True|False|None|null|undefined|public|private|static|void|int|string|boolean)\b|\b[A-Za-z_$][\w$]*(?=\s*\())/g;
+  const classFor = token => {
+    if (/^(\/\/|#|\/\*)/.test(token)) return "syntax-comment";
+    if (/^["'`]/.test(token)) return "syntax-string";
+    if (/^\d/.test(token)) return "syntax-number";
+    if (/^(function|return|const|let|var|if|else|for|while|class|new|import|from|export|async|await|def|in|print|True|False|None|null|undefined|public|private|static|void|int|string|boolean)$/.test(token)) return "syntax-keyword";
+    return "syntax-function";
+  };
+  const parts = [];
+  let lastIndex = 0;
+  source.replace(tokenPattern, (token, _commentOrString, _quote, offset) => {
+    if (offset > lastIndex) parts.push(source.slice(lastIndex, offset));
+    parts.push(<span className={classFor(token)} key={`${language}-${offset}`}>{token}</span>);
+    lastIndex = offset + token.length;
+    return token;
+  });
+  if (lastIndex < source.length) parts.push(source.slice(lastIndex));
+  return parts;
+}
+function CopyableCode({ source, language }) {
+  const [copied, setCopied] = useState(false);
+  async function copyCode() {
+    try {
+      await navigator.clipboard.writeText(source);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      setCopied(false);
+    }
+  }
+  return <div className="code-block">
+    <div className="code-block-toolbar"><span>{language || "code"}</span><button type="button" onClick={copyCode} title="Copy code"><Copy size={13}/>{copied ? "Copied" : "Copy"}</button></div>
+    <pre><code className={`language-${language || "text"}`}>{highlightCode(source, language)}</code></pre>
+  </div>;
 }
 function callTextProvider(provider, key, model, input) {
   if (provider === "gemini") {
@@ -277,7 +388,7 @@ function callTextProvider(provider, key, model, input) {
       Authorization: `Bearer ${key}`,
       ...(provider === "openrouter" ? { "HTTP-Referer": window.location.origin, "X-Title": "StreakUp" } : {})
     },
-    body: JSON.stringify({ model, messages: [{ role: "user", content: input }], temperature: 0.7, max_tokens: 1200 })
+    body: JSON.stringify({ model, messages: [{ role: "user", content: input }], temperature: 0.7, max_tokens: 900 })
   }).then(async response => {
     const result = await response.json();
     if (!response.ok) throw new Error(result.error?.message || `${provider} returned HTTP ${response.status}.`);
@@ -285,11 +396,14 @@ function callTextProvider(provider, key, model, input) {
   });
 }
 function MarkdownMessage({ text }) {
-  const lines = normalizeMath(text).replace(/\r\n/g, "\n").split("\n");
+  const lines = limitAssistantResponse(typeof text === "string" ? text : "").replace(/\r\n/g, "\n").split("\n");
   const blocks = [];
   let list = [];
   let listType = "";
   let table = [];
+  let code = [];
+  let inCode = false;
+  let codeLanguage = "";
   const flushList = () => {
     if (!list.length) return;
     const List = listType === "ordered" ? "ol" : "ul";
@@ -299,7 +413,7 @@ function MarkdownMessage({ text }) {
   };
   const flushTable = () => {
     if (table.length < 2) {
-      table.forEach((row, index) => blocks.push(<p key={`table-fallback-${blocks.length}-${index}`}>{renderInlineMarkdown(row)}</p>));
+      table.forEach((row, index) => blocks.push(<p key={`table-fallback-${blocks.length}-${index}`}>{renderInlineMarkdown(row.join(" | "))}</p>));
       table = [];
       return;
     }
@@ -308,13 +422,35 @@ function MarkdownMessage({ text }) {
     blocks.push(<div className="chat-table-wrap" key={`table-${blocks.length}`}><table><thead><tr>{header.map((cell, index) => <th key={index}>{renderInlineMarkdown(cell)}</th>)}</tr></thead><tbody>{rows.map((row, rowIndex) => <tr key={rowIndex}>{header.map((_, cellIndex) => <td key={cellIndex}>{renderInlineMarkdown(row[cellIndex] || "")}</td>)}</tr>)}</tbody></table></div>);
     table = [];
   };
+  const flushCode = () => {
+    if (!code.length) return;
+    blocks.push(<CopyableCode key={`code-${blocks.length}`} source={code.join("\n")} language={codeLanguage}/>);
+    code = [];
+    codeLanguage = "";
+  };
   const isTableRow = line => /^\s*\|.*\|\s*$/.test(line);
   const isTableSeparator = line => /^\s*\|(?:\s*:?-+:?\s*\|)+\s*$/.test(line);
   const parseTableRow = line => line.trim().replace(/^\||\|$/g, "").split("|").map(cell => cell.trim());
   lines.forEach((line, index) => {
-    const heading = line.match(/^\s{0,3}(#{1,3})\s+(.+)$/);
+    if (/^\s*```/.test(line)) {
+      if (inCode) flushCode();
+      else {
+        flushList();
+        flushTable();
+        codeLanguage = line.replace(/^\s*```/, "").trim().toLowerCase().split(/\s+/)[0];
+      }
+      inCode = !inCode;
+      return;
+    }
+    if (inCode) {
+      code.push(line);
+      return;
+    }
+    line = normalizeMath(line);
+    const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+)$/);
     const unordered = line.match(/^\s*[-*]\s+(.+)$/);
     const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    const quote = line.match(/^\s*>\s?(.*)$/);
     if (isTableRow(line)) {
       if (isTableSeparator(line)) return;
       flushList();
@@ -325,7 +461,9 @@ function MarkdownMessage({ text }) {
         const Heading = `h${heading[1].length}`;
         blocks.push(<Heading key={`heading-${index}`}>{renderInlineMarkdown(heading[2])}</Heading>);
       } else if (line.trim()) {
-        blocks.push(<p key={`paragraph-${index}`}>{renderInlineMarkdown(line)}</p>);
+        blocks.push(quote
+          ? <blockquote key={`quote-${index}`}>{renderInlineMarkdown(quote[1])}</blockquote>
+          : <p key={`paragraph-${index}`}>{renderInlineMarkdown(line)}</p>);
       }
     } else if (heading) {
       flushList();
@@ -336,6 +474,9 @@ function MarkdownMessage({ text }) {
       if (listType && listType !== nextType) flushList();
       listType = nextType;
       list.push((unordered || ordered)[1]);
+    } else if (quote) {
+      flushList();
+      blocks.push(<blockquote key={`quote-${index}`}>{renderInlineMarkdown(quote[1])}</blockquote>);
     } else {
       flushList();
       if (line.trim()) blocks.push(<p key={`paragraph-${index}`}>{renderInlineMarkdown(line)}</p>);
@@ -343,12 +484,13 @@ function MarkdownMessage({ text }) {
   });
   flushList();
   flushTable();
+  flushCode();
   return <div className="markdown-message">{blocks}</div>;
 }
-function AssistantResources({ resources }) {
+function AssistantResources({ resources, prominent = false }) {
   if (!resources?.length) return null;
-  return <div className="assistant-resources">
-    <div className="assistant-resources-title">Helpful resources</div>
+  return <div className={`assistant-resources ${prominent ? "visual-resources" : ""}`}>
+    <div className="assistant-resources-title">{prominent ? "Visual reference" : "Helpful resources"}</div>
     <div className="assistant-resource-list">{resources.map((resource, index) => <a className="assistant-resource" href={resource.url} target="_blank" rel="noreferrer" key={`${resource.url}-${index}`}>
       {resource.type === "image" ? <img src={resource.url} alt="" loading="lazy" onError={event => { event.currentTarget.style.display = "none"; }}/> : <span className={`resource-icon ${resource.type}`}>{resource.type === "video" ? "▶" : "↗"}</span>}
       <span><strong>{resource.title}</strong><small>{resource.type === "video" ? "Watch video" : resource.type === "image" ? "View diagram" : "Open resource"}</small></span>
@@ -611,9 +753,14 @@ export default function App() {
     setPage("Overview");
     notify("Your account and local workspace were deleted.");
   }
-  async function sendCoach(e) {
-    e.preventDefault();
-    const q = coachInput.trim(); if (!q) return;
+  async function sendCoach(e, regenerateMessageId = null) {
+    e?.preventDefault();
+    const sourceMessages = coachMessages;
+    const regenerationIndex = regenerateMessageId ? sourceMessages.findIndex(message => message.id === regenerateMessageId) : -1;
+    const q = regenerationIndex > 0 && sourceMessages[regenerationIndex - 1]?.role === "user"
+      ? sourceMessages[regenerationIndex - 1].text.trim()
+      : coachInput.trim();
+    if (!q) return;
     if (!providerKeys.gemini && !providerKeys.groq && !providerKeys.openrouter) {
       setShowProviderSetup(true);
       return notify("Add at least one AI provider key before starting a chat.");
@@ -627,14 +774,28 @@ export default function App() {
         habits: data.habits,
         consistency: data.consistency
       });
-      const conversation = coachMessages.map(({ role, text }) => `${role === "assistant" ? "Assistant" : "User"}: ${text}`).join("\n\n");
+      const conversation = sourceMessages.map(({ role, text }) => `${role === "assistant" ? "Assistant" : "User"}: ${text}`).join("\n\n");
+      const visualRequest = wantsVisualResource(q);
+      const codingScope = getCodingScope(q);
       let resources = [];
       try {
         resources = [...await searchWebResources(q, providerKeys), ...await searchYouTubeResources(q, providerKeys.youtube)];
       } catch (resourceError) {
         console.warn("Optional resource search failed.", resourceError);
       }
-      const input = `You are Momentum, a capable and warm general-purpose AI assistant inside StreakUp. Answer any reasonable question, including studies, work, business, household problems, planning, relationships, and everyday decisions. Analyze the prompt first and do not force every answer into productivity or consistency advice. When the question is about consistency, habits, goals, or follow-through, give practical real-world guidance beyond this website. Use StreakUp context only when it helps. Be honest about uncertainty, avoid pretending to be a professional, and give safe, actionable steps. Keep the answer concise: use at most 6 short paragraphs or bullets and aim for under 450 words. Finish every sentence before stopping; prioritize the most useful points and do not pad the answer. When a comparison or schedule is clearer as a table, use standard Markdown table syntax with a header row and separator row, such as | Topic | Advice | followed by | --- | --- |.
+      const input = `You are Momentum, a capable and warm general-purpose AI assistant inside StreakUp. Answer any reasonable question, including studies, work, business, household problems, planning, relationships, and everyday decisions. Analyze the prompt first and do not force every answer into productivity or consistency advice. When the question is about consistency, habits, goals, or follow-through, give practical real-world guidance beyond this website. Use StreakUp context only when it helps. Be honest about uncertainty, avoid pretending to be a professional, and give safe, actionable steps.
+
+Formatting contract: structure every response for easy scanning. Start with a short relevant heading when useful, then use short paragraphs, numbered steps, bullets, checklists, or a Markdown table when they improve clarity. Use fenced code blocks for code or commands, blockquotes for quoted text, and never place multiple unrelated ideas in one dense paragraph. Keep each paragraph to 2–4 sentences. Do not output raw ASCII art, pseudo-tables, or long arrow chains.
+
+Coding contract: when the user asks for code, first judge the requested scope. For a small script, learning exercise, utility, or one-file program, choose the simplest complete working solution with minimal dependencies and explain it briefly. Use a larger architecture, multiple files, abstractions, validation layers, and tests only when the user explicitly asks for a production system or the requirements genuinely demand project scale. State the chosen scope in one short sentence. Put code in fenced blocks with the correct language tag, keep names clear, and include only the files or setup steps needed for that scope.
+
+Scope classification for this request: ${codingScope === "simple" ? "SIMPLE BEGINNER TASK" : codingScope === "small" ? "SMALL PROGRAM" : codingScope === "project" ? "LARGER PROJECT" : "NOT SPECIFICALLY CLASSIFIED"}.
+${codingScope === "simple" ? "Strict simple-task rule: give the shortest complete beginner solution. For a basic calculation, use direct input, one calculation, and one output in a single file. Do not create functions, classes, type annotations, docstrings, validation loops, custom error handling, menus, or extra explanation unless the user explicitly asks for them. Prefer roughly 3–10 lines." : ""}
+${codingScope === "small" ? "Strict small-program rule: return one short, self-contained file; use the standard library only unless the user explicitly requests a dependency; avoid classes, design patterns, layered architecture, config files, APIs, databases, error frameworks, tests, and extra folders; include only the directly requested behavior. Prefer a beginner-readable implementation of roughly 10–40 lines when practical." : ""}
+
+Visual-first contract: if the user asks for a flowchart, diagram, illustration, image, mind map, architecture diagram, process map, infographic, or other visual, show a supplied image resource before the written explanation and do not recreate the visual as a wall of text. Add only a brief caption and a few interpretation points after the image. If no suitable image resource is available, clearly say so and provide a clean numbered fallback or a compact Mermaid code block instead. Do not pretend that text is an image.
+
+Keep the answer balanced: provide the complete useful answer in at most 6 short paragraphs or bullets and aim for 250–350 words. Do not stop before covering the main parts of the request, but do not add filler or repeat yourself. Finish every sentence before stopping. When a comparison or schedule is clearer as a table, use standard Markdown table syntax with a header row and separator row, such as | Topic | Advice | followed by | --- | --- |.
 
 Use current web information when the supplied resources are relevant. Do not invent citations or URLs. If resources are supplied, mention them naturally where useful.
 
@@ -662,7 +823,9 @@ User: ${q}`;
       if (!answer && lastError) throw lastError;
       if (!answer) throw new Error("Google AI returned an empty response.");
       const parsed = parseAssistantResponse(answer);
-      parsed.resources = [...parsed.resources, ...resources].slice(0, 6);
+      parsed.resources = [...parsed.resources, ...resources]
+        .sort((left, right) => visualRequest ? Number(right.type === "image") - Number(left.type === "image") : 0)
+        .slice(0, 6);
       answer = limitAssistantResponse(parsed.text);
       var responseResources = parsed.resources;
     } catch (error) {
@@ -679,13 +842,23 @@ User: ${q}`;
     }
     const parsedAnswer = parseAssistantResponse(answer);
     parsedAnswer.resources = typeof responseResources === "undefined" ? parsedAnswer.resources : responseResources;
-    const userMessage = { id: uid(), role: "user", text: q };
-    const assistantMessage = { id: uid(), role: "assistant", text: "", resources: parsedAnswer.resources };
+    const assistantMessage = { id: uid(), role: "assistant", text: "", resources: parsedAnswer.resources, visual: wantsVisualResource(q) };
     setCoachConversations(conversations => conversations.map(conversation => conversation.id === activeCoachId
-      ? { ...conversation, title: conversation.title === "New conversation" ? q.slice(0, 42) : conversation.title, updatedAt: Date.now(), messages: [...conversation.messages, userMessage, assistantMessage] }
+      ? {
+        ...conversation,
+        title: conversation.title === "New conversation" ? q.slice(0, 42) : conversation.title,
+        updatedAt: Date.now(),
+        messages: regenerateMessageId
+          ? conversation.messages.map(message => message.id === regenerateMessageId ? assistantMessage : message)
+          : [...conversation.messages, { id: uid(), role: "user", text: q }, assistantMessage]
+      }
       : conversation));
     setCoachStreaming({ conversationId: activeCoachId, messageId: assistantMessage.id, text: parsedAnswer.text, index: 0 });
     setCoachInput("");
+  }
+  function regenerateCoachResponse(messageId) {
+    if (coachRequesting || coachStreaming) return;
+    sendCoach(null, messageId);
   }
   function finishFocus() {
     if (!focusStarted) {
@@ -768,7 +941,7 @@ User: ${q}`;
         {page === "Tasks & goals" && <TasksPage data={data} tasks={filteredTasks} search={search} setSearch={setSearch} onAddTask={() => setAddModal("task")} onAddGoal={() => setAddModal("goal")} onToggle={updateTask} onGoal={updateGoal} />}
         {page === "Habits & streaks" && <HabitsPage data={data} onAdd={() => setAddModal("habit")} onToggle={toggleHabit} />}
         {page === "Focus room" && <FocusPage seconds={focusSeconds} setSeconds={setFocusSeconds} running={focusRunning} setRunning={setFocusRunning} started={focusStarted} setStarted={setFocusStarted} mode={focusMode} setMode={setFocusMode} task={focusTask} setTask={setFocusTask} tasks={data.tasks} onFinish={finishFocus} data={data} />}
-        {page === "AI coach" && <CoachPage messages={coachMessages} input={coachInput} setInput={setCoachInput} onSend={sendCoach} data={data} conversations={coachConversations} currentId={activeCoachId} onSelect={id => setCurrentCoachId(id)} onNew={newCoachConversation} onDelete={deleteCoachConversation} onPin={toggleCoachPin} isTyping={Boolean(coachStreaming) || coachRequesting} hasApiKey={Boolean(providerKeys.gemini || providerKeys.groq || providerKeys.openrouter)} onOpenApiKeySetup={() => setShowProviderSetup(true)} onRemoveApiKey={removeProviderKeys} />}
+        {page === "AI coach" && <CoachPage messages={coachMessages} input={coachInput} setInput={setCoachInput} onSend={sendCoach} onRegenerate={regenerateCoachResponse} data={data} conversations={coachConversations} currentId={activeCoachId} onSelect={id => setCurrentCoachId(id)} onNew={newCoachConversation} onDelete={deleteCoachConversation} onPin={toggleCoachPin} isTyping={Boolean(coachStreaming) || coachRequesting} hasApiKey={Boolean(providerKeys.gemini || providerKeys.groq || providerKeys.openrouter)} onOpenApiKeySetup={() => setShowProviderSetup(true)} onRemoveApiKey={removeProviderKeys} />}
         {page === "Analytics" && <AnalyticsPage data={data} />}
         {page === "Accountability" && <AccountabilityPage data={data} setData={setData} onNotify={notify} />}
         {page === "Settings" && <SettingsPage data={data} setData={setData} onNotify={notify} user={user} accountForm={accountForm} setAccountForm={setAccountForm} onSaveName={saveAccountName} onSignOut={signOut} onDeleteAccount={deleteAccount} />}
@@ -918,12 +1091,26 @@ function ProviderSetupModal({ keys, setKeys, onSave, onClose }) {
     </div>
   </Modal>;
 }
-function CoachPage({ messages, input, setInput, onSend, data, conversations, currentId, onSelect, onNew, onDelete, onPin, isTyping, hasApiKey, onOpenApiKeySetup, onRemoveApiKey }) {
+function CoachPage({ messages, input, setInput, onSend, onRegenerate, data, conversations, currentId, onSelect, onNew, onDelete, onPin, isTyping, hasApiKey, onOpenApiKeySetup, onRemoveApiKey }) {
   const [historyVisible, setHistoryVisible] = useState(true);
+  const chatMessagesRef = useRef(null);
+  const shouldAutoScrollRef = useRef(true);
   const prompts = ["Help me plan today","I keep falling behind","I have a problem at work"];
+  useEffect(() => {
+    const viewport = chatMessagesRef.current;
+    if (!viewport || !shouldAutoScrollRef.current) return;
+    requestAnimationFrame(() => {
+      viewport.scrollTop = viewport.scrollHeight;
+    });
+  }, [messages, isTyping]);
+  function handleChatScroll(event) {
+    const viewport = event.currentTarget;
+    const distanceFromBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+    shouldAutoScrollRef.current = distanceFromBottom <= 48;
+  }
   return <>
     <SectionTitle eyebrow="A LITTLE MORE CLARITY" title="Your AI coach" description="Ask about consistency, studies, work, business, home, or anything else." action={<button className="secondary-button small" onClick={onOpenApiKeySetup}>{hasApiKey ? "Change Google AI key" : "Add Google AI key"}</button>}/>
-    <div className={`coach-layout ${historyVisible ? "" : "history-hidden"}`}>{historyVisible && <div className="card coach-history"><div className="coach-history-head"><div className="eyebrow">CHAT HISTORY</div><div className="coach-history-actions"><button className="primary-button small" onClick={onNew}><Plus size={14}/> New chat</button><button className="icon-button" title="Hide chat history" aria-label="Hide chat history" onClick={()=>setHistoryVisible(false)}><ChevronLeft size={16}/></button></div></div><div className="coach-history-list">{[...conversations].sort((a,b)=>Number(b.pinned)-Number(a.pinned)||b.updatedAt-a.updatedAt).map(conversation=><div className={`coach-history-item ${conversation.id===currentId?"selected":""}`} key={conversation.id}><button onClick={()=>onSelect(conversation.id)}><span>{conversation.pinned && "PIN · "}{conversation.title}</span><small>{conversation.messages.filter(m=>m.role==="user").length} messages</small></button><div><button className="icon-button" title={conversation.pinned?"Unpin chat":"Pin chat"} onClick={()=>onPin(conversation.id)}>★</button><button className="icon-button" title="Delete chat" onClick={()=>onDelete(conversation.id)}><X size={14}/></button></div></div>)}</div></div>}<div className="card coach-chat"><div className="chat-head">{!historyVisible && <button className="icon-button" title="Show chat history" aria-label="Show chat history" onClick={()=>setHistoryVisible(true)}><ChevronRight size={16}/></button>}<div className="coach-avatar"><BrainCircuit size={20}/></div><div><strong>Momentum</strong><span><i/> {isTyping ? "Working…" : "Ready to help"}</span></div><Pill tone="purple">MULTI-PROVIDER AI</Pill></div><div className="chat-messages">{messages.map(m=><div key={m.id} className={`chat-message ${m.role}`}><div className="chat-bubble">{m.role === "assistant" ? <><MarkdownMessage text={m.text}/><AssistantResources resources={m.resources}/></> : m.text}{isTyping && m.role==="assistant" && !m.text && <span className="typing-dots">...</span>}</div></div>)}</div><div className="suggested-prompts">{prompts.map(p=><button key={p} onClick={()=>setInput(p)}>{p} <ArrowUpRight size={12}/></button>)}</div><form className="chat-input-row" onSubmit={onSend}><input value={input} onChange={e=>setInput(e.target.value)} placeholder="Ask anything…"/><button className="send-button" aria-label="Send message" disabled={isTyping || !hasApiKey}><Send size={17}/></button></form><div className="chat-disclaimer">{hasApiKey ? "AI routing uses your saved provider keys with live search when configured." : "Connect an AI provider to start chatting."} <button className="inline-link" onClick={onOpenApiKeySetup}>{hasApiKey ? "Manage providers" : "Set up now"}</button>{hasApiKey && <button className="inline-link" onClick={onRemoveApiKey}>Remove keys</button>}</div></div><div className="coach-side"><div className="card insight-card"><div className="insight-icon"><Sparkles size={18}/></div><div className="eyebrow">A STARTING INSIGHT</div><h3>Make the next step smaller.</h3><p>You have {data.tasks.filter(t=>!t.completed).length} unfinished tasks. Pick one that takes 15–25 minutes and begin there.</p></div><div className="card coach-context"><div className="eyebrow">YOUR CURRENT SNAPSHOT</div><div><span>Consistency score</span><strong>{data.consistency}%</strong></div><Progress value={data.consistency}/><div><span>Goals in progress</span><strong>{data.goals.length}</strong></div><div><span>Active habits</span><strong>{data.habits.length}</strong></div><div><span>Unfinished tasks</span><strong>{data.tasks.filter(t=>!t.completed).length}</strong></div></div></div></div>
+    <div className={`coach-layout ${historyVisible ? "" : "history-hidden"}`}>{historyVisible && <div className="card coach-history"><div className="coach-history-head"><div className="eyebrow">CHAT HISTORY</div><div className="coach-history-actions"><button className="primary-button small" onClick={onNew}><Plus size={14}/> New chat</button><button className="icon-button" title="Hide chat history" aria-label="Hide chat history" onClick={()=>setHistoryVisible(false)}><ChevronLeft size={16}/></button></div></div><div className="coach-history-list">{[...conversations].sort((a,b)=>Number(b.pinned)-Number(a.pinned)||b.updatedAt-a.updatedAt).map(conversation=><div className={`coach-history-item ${conversation.id===currentId?"selected":""}`} key={conversation.id}><button onClick={()=>onSelect(conversation.id)}><span>{conversation.pinned && "PIN · "}{conversation.title}</span><small>{conversation.messages.filter(m=>m.role==="user").length} messages</small></button><div><button className="icon-button" title={conversation.pinned?"Unpin chat":"Pin chat"} onClick={()=>onPin(conversation.id)}>★</button><button className="icon-button" title="Delete chat" onClick={()=>onDelete(conversation.id)}><X size={14}/></button></div></div>)}</div></div>}<div className="card coach-chat"><div className="chat-head">{!historyVisible && <button className="icon-button" title="Show chat history" aria-label="Show chat history" onClick={()=>setHistoryVisible(true)}><ChevronRight size={16}/></button>}<div className="coach-avatar"><BrainCircuit size={20}/></div><div><strong>Momentum</strong><span><i/> {isTyping ? "Working…" : "Ready to help"}</span></div><Pill tone="purple">MULTI-PROVIDER AI</Pill></div><div className="chat-messages" ref={chatMessagesRef} onScroll={handleChatScroll}>{messages.map(m=><div key={m.id} className={`chat-message ${m.role}`}><div className="chat-bubble">{m.role === "assistant" ? <>{m.visual && <AssistantResources resources={m.resources?.filter(resource => resource.type === "image")} prominent/>}<MarkdownMessage text={m.text}/>{m.visual ? <AssistantResources resources={m.resources?.filter(resource => resource.type !== "image")}/> : <AssistantResources resources={m.resources}/>}<button className="response-action" type="button" onClick={()=>onRegenerate(m.id)} disabled={isTyping || !hasApiKey} title="Generate a new response"><RotateCcw size={13}/> Regenerate</button></> : m.text}{isTyping && m.role==="assistant" && !m.text && <span className="typing-dots">...</span>}</div></div>)}</div><div className="suggested-prompts">{prompts.map(p=><button key={p} onClick={()=>setInput(p)}>{p} <ArrowUpRight size={12}/></button>)}</div><form className="chat-input-row" onSubmit={onSend}><input value={input} onChange={e=>setInput(e.target.value)} placeholder="Ask anything…"/><button className="send-button" aria-label="Send message" disabled={isTyping || !hasApiKey}><Send size={17}/></button></form><div className="chat-disclaimer">{hasApiKey ? "AI routing uses your saved provider keys with live search when configured." : "Connect an AI provider to start chatting."} <button className="inline-link" onClick={onOpenApiKeySetup}>{hasApiKey ? "Manage providers" : "Set up now"}</button>{hasApiKey && <button className="inline-link" onClick={onRemoveApiKey}>Remove keys</button>}</div></div><div className="coach-side"><div className="card insight-card"><div className="insight-icon"><Sparkles size={18}/></div><div className="eyebrow">A STARTING INSIGHT</div><h3>Make the next step smaller.</h3><p>You have {data.tasks.filter(t=>!t.completed).length} unfinished tasks. Pick one that takes 15–25 minutes and begin there.</p></div><div className="card coach-context"><div className="eyebrow">YOUR CURRENT SNAPSHOT</div><div><span>Consistency score</span><strong>{data.consistency}%</strong></div><Progress value={data.consistency}/><div><span>Goals in progress</span><strong>{data.goals.length}</strong></div><div><span>Active habits</span><strong>{data.habits.length}</strong></div><div><span>Unfinished tasks</span><strong>{data.tasks.filter(t=>!t.completed).length}</strong></div></div></div></div>
   </>;
 }
 function AnalyticsPage({ data }) {
@@ -949,7 +1136,27 @@ function AccountabilityPage({ data, setData, onNotify }) {
   </>;
 }
 function SettingsPage({ data, setData, onNotify, user, accountForm, setAccountForm, onSaveName, onSignOut, onDeleteAccount }) {
+  const [bugReport, setBugReport] = useState({ subject: "", description: "" });
   function change(key,value) { setData(d=>({...d,settings:{...d.settings,[key]:value}})); onNotify("Settings updated."); }
+  function reportProblem(event) {
+    event.preventDefault();
+    const subject = bugReport.subject.trim() || "StreakUp bug report";
+    const description = bugReport.description.trim();
+    if (!description) {
+      onNotify("Describe the problem before sending the report.");
+      return;
+    }
+    const body = [
+      description,
+      "",
+      "--- Technical context ---",
+      `Page: ${window.location.pathname}`,
+      `Account: ${user?.email || accountForm.email || "Not signed in"}`,
+      `Browser: ${navigator.userAgent}`
+    ].join("\n");
+    window.location.href = `mailto:vaibhavrohilla862@gmail.com?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    onNotify("Opening your email app with the bug report.");
+  }
   return <>
     <SectionTitle eyebrow="MAKE IT YOURS" title="Account settings" description="Manage your profile, security and workspace preferences."/>
     <div className="settings-layout"><div className="card settings-card"><div className="settings-section-head"><IconBox tone="violet"><CircleUserRound size={18}/></IconBox><div><h3>Account & privacy</h3><p>Manage your identity and data access.</p></div></div><div className="settings-row"><div><strong>Account status</strong><span>{user ? `Signed in as ${user.email}` : "Local account — signed out"}</span></div><Pill tone={user?"warning":"neutral"}>{user?"Browser account":"Signed out"}</Pill></div><div className="settings-row"><div><strong>Private data</strong><span>Stored in this browser's local storage</span></div><ShieldCheck size={18} className="settings-icon"/></div></div>
@@ -957,6 +1164,7 @@ function SettingsPage({ data, setData, onNotify, user, accountForm, setAccountFo
       <div className="card settings-card"><div className="settings-section-head"><IconBox tone="blue"><ShieldCheck size={18}/></IconBox><div><h3>Account access</h3><p>End this session or permanently remove your local account.</p></div></div><div className="settings-row"><div><strong>Sign out</strong><span>Remove this browser session</span></div><button className="secondary-button" onClick={onSignOut}><LogOut size={15}/> Sign out</button></div><div className="settings-row danger-row"><div><strong>Delete account</strong><span>Delete your account and all workspace data from this browser</span></div><button className="danger-button" onClick={onDeleteAccount}>Delete account</button></div></div>
       <div className="card settings-card"><div className="settings-section-head"><IconBox tone="blue"><Bell size={18}/></IconBox><div><h3>Reminders</h3><p>Keep reminders helpful, not overwhelming.</p></div></div><div className="settings-row"><div><strong>In-app reminders</strong><span>Show gentle reminder messages</span></div><button className={`toggle ${data.settings.reminders?"on":""}`} onClick={()=>change("reminders",!data.settings.reminders)}><i/></button></div><div className="settings-row"><div><strong>Grace days</strong><span>Recovery days allowed per week</span></div><select value={data.settings.graceDays} onChange={e=>change("graceDays",Number(e.target.value))}><option value="0">0 days</option><option value="1">1 day</option><option value="2">2 days</option></select></div></div>
       <div className="card settings-card"><div className="settings-section-head"><IconBox tone="amber"><Zap size={18}/></IconBox><div><h3>Experience & scoring</h3><p>Keep your system encouraging and transparent.</p></div></div><div className="settings-row"><div><strong>Current XP</strong><span>Earned through completed actions</span></div><strong>{data.xp} XP</strong></div><div className="settings-row"><div><strong>Consistency score</strong><span>Current score out of 100</span></div><strong>{data.consistency}/100</strong></div><button className="secondary-button" onClick={()=>{setData(initialState);onNotify("Workspace cleared.");}}>Clear workspace</button></div>
+      <div className="card settings-card"><div className="settings-section-head"><IconBox tone="blue"><Mail size={18}/></IconBox><div><h3>Report a problem</h3><p>Found a bug? Send the details directly to the StreakUp support email.</p></div></div><form className="form-stack" onSubmit={reportProblem}><label>Subject<input value={bugReport.subject} onChange={e=>setBugReport(current=>({...current,subject:e.target.value}))} placeholder="e.g. Chat response is not displaying"/></label><label>What went wrong?<textarea value={bugReport.description} onChange={e=>setBugReport(current=>({...current,description:e.target.value}))} placeholder="Describe what you expected, what happened, and how to reproduce it." rows="5" required /></label><button className="primary-button" type="submit"><Mail size={15}/> Report problem by email</button></form></div>
     </div>
   </>;
 }
