@@ -88,6 +88,9 @@ function loadDemoSession() {
     return raw ? JSON.parse(raw) : null;
   } catch { return null; }
 }
+function loadLocalOwnerEmail() {
+  return loadDemoSession()?.email?.trim().toLowerCase() || "";
+}
 function createCoachConversation() {
   return {
     id: uid(),
@@ -578,15 +581,59 @@ export default function App() {
             setProviderKeys(keys); setProviderKeyDraft(keys);
           }
         } else {
-          const { error: migrationError } = await supabase.from("workspace_state").insert({ user_id: session.user.id, state: { data: loadLocal(), coachConversations: loadCoachConversations(), providerKeys: loadProviderKeys(session.user.email) } });
+          const currentEmail = session.user.email?.trim().toLowerCase() || "";
+          const sameLocalAccount = currentEmail && currentEmail === loadLocalOwnerEmail();
+          const localData = sameLocalAccount ? loadLocal() : initialState;
+          const localConversations = sameLocalAccount ? loadCoachConversations() : [createCoachConversation()];
+          const localProviderKeys = sameLocalAccount ? loadProviderKeys(session.user.email) : { gemini: "", groq: "", openrouter: "", tavily: "", youtube: "" };
+          setData(localData);
+          setCoachConversations(localConversations);
+          setProviderKeys(localProviderKeys);
+          setProviderKeyDraft(localProviderKeys);
+          const { error: migrationError } = await supabase.from("workspace_state").insert({
+            user_id: session.user.id,
+            state: {
+              data: localData,
+              coachConversations: localConversations,
+              providerKeys: localProviderKeys,
+              migratedFromLocalEmail: sameLocalAccount ? currentEmail : null
+            }
+          });
           if (migrationError) console.error("Local workspace migration failed.", migrationError);
         }
       }
       setCloudReady(true); setAuthLoading(false);
     });
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => { if (active) setUser(session?.user || null); });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!active) return;
+      setUser(session?.user || null);
+      if (!session?.user) {
+        setUsername("");
+        setUsernameDraft("");
+        setUsernameError("");
+      }
+    });
     return () => { active = false; listener.subscription.unsubscribe(); };
   }, []);
+  useEffect(() => {
+    if (!supabase || !user?.id) return;
+    let active = true;
+    setUsername("");
+    setUsernameDraft("");
+    supabase.from("profiles").select("username").eq("id", user.id).maybeSingle()
+      .then(({ data: profile, error }) => {
+        if (!active) return;
+        if (error) {
+          console.error("Profile could not be loaded.", error);
+          setUsernameError("Your username could not be checked. Please refresh and try again.");
+          return;
+        }
+        const savedUsername = profile?.username || "";
+        setUsername(savedUsername);
+        setUsernameDraft(savedUsername);
+      });
+    return () => { active = false; };
+  }, [user?.id]);
   useEffect(() => {
     if (!coachStreaming) return;
     const visibleText = coachStreaming.text.slice(0, coachStreaming.index);
@@ -1222,6 +1269,10 @@ function AccountabilityPage({ data, setData, onNotify, user, username }) {
   const [groupName, setGroupName] = useState("");
   const [taskTitle, setTaskTitle] = useState("");
   const [message, setMessage] = useState("");
+  const [mentionQuery, setMentionQuery] = useState(null);
+  const messageInputRef = useRef(null);
+  const [showMembers, setShowMembers] = useState(false);
+  const [renameDraft, setRenameDraft] = useState("");
   const [loading, setLoading] = useState(Boolean(supabase));
   const [error, setError] = useState("");
 
@@ -1266,6 +1317,32 @@ function AccountabilityPage({ data, setData, onNotify, user, username }) {
     if (memberError) return setError(memberError.message);
     setGroupName(""); await loadGroups(); setSelectedGroup(group); onNotify("Group created.");
   }
+  async function renameGroup(event) {
+    event.preventDefault();
+    const name = renameDraft.trim();
+    if (!selectedGroup || !name) return;
+    const { data: group, error: renameError } = await supabase.from("groups").update({ name }).eq("id", selectedGroup.id).eq("owner_id", user.id).select().single();
+    if (renameError) setError(renameError.message);
+    else { setSelectedGroup(group); setGroups(current => current.map(item => item.id === group.id ? group : item)); setRenameDraft(""); onNotify("Group renamed."); }
+  }
+  async function deleteGroup() {
+    if (!selectedGroup || selectedGroup.owner_id !== user.id || !window.confirm(`Delete ${selectedGroup.name} and all its shared data?`)) return;
+    const { error: deleteError } = await supabase.from("groups").delete().eq("id", selectedGroup.id).eq("owner_id", user.id);
+    if (deleteError) setError(deleteError.message);
+    else { setGroups(current => current.filter(item => item.id !== selectedGroup.id)); setSelectedGroup(null); onNotify("Group deleted."); }
+  }
+  async function leaveGroup() {
+    if (!selectedGroup || !window.confirm(`Leave ${selectedGroup.name}?`)) return;
+    const { error: leaveError } = await supabase.from("group_members").delete().eq("group_id", selectedGroup.id).eq("user_id", user.id);
+    if (leaveError) setError(leaveError.message);
+    else { setGroups(current => current.filter(item => item.id !== selectedGroup.id)); setSelectedGroup(null); onNotify("You left the group."); }
+  }
+  async function kickMember(member) {
+    if (!selectedGroup || selectedGroup.owner_id !== user.id || member.user_id === user.id) return;
+    const { error: kickError } = await supabase.from("group_members").delete().eq("group_id", selectedGroup.id).eq("user_id", member.user_id);
+    if (kickError) setError(kickError.message);
+    else { setMembers(current => current.filter(item => item.user_id !== member.user_id)); onNotify(`@${member.username} was removed.`); }
+  }
   async function joinFromLink() {
     const token = new URLSearchParams(window.location.search).get("invite");
     if (!supabase || !token || !user?.id) return;
@@ -1295,16 +1372,43 @@ function AccountabilityPage({ data, setData, onNotify, user, username }) {
     const { error: messageError } = await supabase.from("group_messages").insert({ group_id: selectedGroup.id, user_id: user.id, username, body: message.trim() });
     if (messageError) setError(messageError.message); else setMessage("");
   }
+  function updateMessage(event) {
+    const { value, selectionStart } = event.target;
+    setMessage(value);
+    const textBeforeCursor = value.slice(0, selectionStart ?? value.length);
+    const mentionMatch = textBeforeCursor.match(/(?:^|\s)@([a-zA-Z0-9_]*)$/);
+    setMentionQuery(mentionMatch ? mentionMatch[1].toLowerCase() : null);
+  }
+  function selectMention(member) {
+    const input = messageInputRef.current;
+    const cursor = input?.selectionStart ?? message.length;
+    const textBeforeCursor = message.slice(0, cursor);
+    const mentionStart = textBeforeCursor.search(/(?:^|\s)@[a-zA-Z0-9_]*$/);
+    if (mentionStart < 0) return;
+    const atIndex = textBeforeCursor[mentionStart] === "@" ? mentionStart : mentionStart + 1;
+    const nextMessage = `${message.slice(0, atIndex)}@${member.username} ${message.slice(cursor)}`;
+    setMessage(nextMessage);
+    setMentionQuery(null);
+    requestAnimationFrame(() => {
+      const nextCursor = atIndex + member.username.length + 2;
+      input?.focus();
+      input?.setSelectionRange(nextCursor, nextCursor);
+    });
+  }
+  const mentionSuggestions = mentionQuery === null
+    ? []
+    : members.filter(member => member.username.toLowerCase().includes(mentionQuery)).slice(0, 6);
   const inviteLink = selectedGroup ? `${window.location.origin}${window.location.pathname}?invite=${selectedGroup.invite_token}` : "";
   if (!supabase) return <InfoAccountability text="Connect Supabase to use groups, invite links, shared tasks, and realtime chat." />;
   return <>
     <SectionTitle eyebrow="BETTER TOGETHER" title="Accountability" description="Create a group, invite people and complete shared tasks together."/>
     {error && <div className="demo-warning">{error}</div>}
     <div className="social-grid">
-      <div className="card social-card"><div className="social-card-icon"><Users size={19}/></div><h3>Create a group</h3><p>Invite friends or classmates with a private link.</p><form className="inline-create" onSubmit={createGroup}><input value={groupName} onChange={event => setGroupName(event.target.value)} placeholder="e.g. Semester study crew"/><button className="primary-button" aria-label="Create group"><Plus size={16}/></button></form>{loading ? <p>Loading groups…</p> : groups.map(group => <button className={`created-row ${selectedGroup?.id === group.id ? "selected" : ""}`} key={group.id} onClick={() => setSelectedGroup(group)}><div className="created-avatar">{group.name.slice(0,1).toUpperCase()}</div><div><strong>{group.name}</strong><span>Select group</span></div><Pill>Private</Pill></button>)}</div>
-      {selectedGroup ? <div className="card social-card"><div className="social-card-icon amber"><Users size={19}/></div><h3>{selectedGroup.name}</h3><p>{members.length} member{members.length === 1 ? "" : "s"} · Share this invite link</p><div className="inline-create"><input value={inviteLink} readOnly/><button type="button" className="primary-button" onClick={() => { navigator.clipboard.writeText(inviteLink); onNotify("Invite link copied."); }}><Copy size={16}/></button></div><form className="inline-create" onSubmit={addSharedTask}><input value={taskTitle} onChange={event => setTaskTitle(event.target.value)} placeholder="Add a task everyone must complete"/><button className="primary-button" aria-label="Add shared task"><Plus size={16}/></button></form>{sharedTasks.map(task => { const completed = task.group_task_completions?.some(item => item.user_id === user.id); return <div className="challenge-row" key={task.id}><div className="challenge-medal"><Check size={17}/></div><div><strong>{task.title}</strong><span>{task.group_task_completions?.length || 0}/{members.length} completed · {task.xp} XP each</span></div><button className="secondary-button small" disabled={completed} onClick={() => toggleSharedTask(task)}>{completed ? "Completed" : "Complete"}</button></div>; })}</div> : <div className="card social-card"><div className="social-card-icon amber"><Trophy size={19}/></div><h3>Join a group</h3><p>Open an invite link from a group owner to join it.</p></div>}
+      <div className="card social-card"><div className="social-card-icon"><Users size={19}/></div><h3>Create a group</h3><p>Invite friends or classmates with a private link.</p><form className="inline-create" onSubmit={createGroup}><input value={groupName} onChange={event => setGroupName(event.target.value)} placeholder="e.g. Semester study crew"/><button className="primary-button" aria-label="Create group"><Plus size={16}/></button></form>{loading ? <p>Loading groups…</p> : groups.map(group => <button className={`created-row ${selectedGroup?.id === group.id ? "selected" : ""}`} key={group.id} onClick={() => setSelectedGroup(group)}><div className="created-avatar">{group.name.slice(0,1).toUpperCase()}</div><div><strong>{group.name}</strong><span>{group.owner_id === user.id ? "Admin" : "Member"}</span></div><Pill>Private</Pill></button>)}</div>
+      {selectedGroup ? <div className="card social-card"><div className="social-card-icon amber"><Users size={19}/></div><div className="group-card-heading"><div><h3>{selectedGroup.name}</h3><p>{members.length} member{members.length === 1 ? "" : "s"} · {selectedGroup.owner_id === user.id ? "You are admin" : "Member"}</p></div><button className="icon-button" title="View members" onClick={() => setShowMembers(true)}><CircleUserRound size={18}/></button></div><div className="inline-create"><input value={inviteLink} readOnly/><button type="button" className="primary-button" onClick={() => { navigator.clipboard.writeText(inviteLink); onNotify("Invite link copied."); }}><Copy size={16}/></button></div>{selectedGroup.owner_id === user.id ? <div className="group-actions"><form className="inline-create" onSubmit={renameGroup}><input value={renameDraft} onChange={event => setRenameDraft(event.target.value)} placeholder="Rename group"/><button className="secondary-button small" type="submit">Rename</button></form><button className="danger-button small" onClick={deleteGroup}>Delete group</button></div> : <button className="secondary-button small" onClick={leaveGroup}>Leave group</button>}<form className="inline-create" onSubmit={addSharedTask}><input value={taskTitle} onChange={event => setTaskTitle(event.target.value)} placeholder="Add a task everyone must complete"/><button className="primary-button" aria-label="Add shared task"><Plus size={16}/></button></form>{sharedTasks.map(task => { const completed = task.group_task_completions?.some(item => item.user_id === user.id); return <div className="challenge-row" key={task.id}><div className="challenge-medal"><Check size={17}/></div><div><strong>{task.title}</strong><span>{task.group_task_completions?.length || 0}/{members.length} completed · {task.xp} XP each</span></div><button className="secondary-button small" disabled={completed} onClick={() => toggleSharedTask(task)}>{completed ? "Completed" : "Complete"}</button></div>; })}</div> : <div className="card social-card"><div className="social-card-icon amber"><Trophy size={19}/></div><h3>Join a group</h3><p>Open an invite link from a group owner to join it.</p></div>}
     </div>
-    {selectedGroup && <div className="card social-card"><div className="social-card-icon"><Send size={19}/></div><h3>Group chat</h3><div className="chat-messages group-chat-messages">{messages.map(item => <div className="chat-message" key={item.id}><div className="chat-bubble"><strong>@{item.username}</strong><br/>{item.body}</div></div>)}</div><form className="chat-input-row" onSubmit={sendMessage}><input value={message} onChange={event => setMessage(event.target.value)} placeholder="Message your group…"/><button className="send-button"><Send size={17}/></button></form></div>}
+    {selectedGroup && <div className="card social-card"><div className="social-card-icon"><Send size={19}/></div><h3>Group chat</h3><div className="chat-messages group-chat-messages">{messages.map(item => <div className="chat-message" key={item.id}><div className="chat-bubble"><strong>@{item.username}</strong><br/>{item.body}</div></div>)}</div><form className="chat-input-row" onSubmit={sendMessage}><div className="chat-composer"><input ref={messageInputRef} value={message} onChange={updateMessage} onKeyDown={event => { if (event.key === "Escape") setMentionQuery(null); }} placeholder="Message your group…"/>{mentionSuggestions.length > 0 && <div className="mention-suggestions" role="listbox" aria-label="Group members"><div className="mention-hint">Mention a member</div>{mentionSuggestions.map(member => <button type="button" className="mention-suggestion" key={member.user_id} onMouseDown={event => event.preventDefault()} onClick={() => selectMention(member)}><span className="created-avatar">{member.username.slice(0, 1).toUpperCase()}</span><span>@{member.username}</span>{member.user_id === selectedGroup.owner_id && <small>Admin</small>}</button>)}</div>}</div><button className="send-button" aria-label="Send message"><Send size={17}/></button></form></div>}
+    {showMembers && <Modal title={`${selectedGroup.name} members`} onClose={() => setShowMembers(false)}><div className="member-list">{members.map(member => <div className="member-row" key={member.user_id}><div className="created-avatar">{member.username.slice(0,1).toUpperCase()}</div><div><strong>@{member.username}</strong><span>{member.user_id === selectedGroup.owner_id ? "Admin" : "Member"}</span></div>{selectedGroup.owner_id === user.id && member.user_id !== user.id && <button className="danger-button small" onClick={() => kickMember(member)}>Kick</button>}</div>)}</div></Modal>}
     <div className="info-banner"><ShieldCheck size={18}/><div><strong>Shared progress, private personal data</strong><p>Only group tasks and group chat are shared. Personal tasks stay private.</p></div></div>
   </>;
 }

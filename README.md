@@ -144,6 +144,8 @@ Do not enter the GitHub URL after the Supabase project URL. The Supabase project
 
 When Supabase variables are present, StreakUp uses Supabase Google OAuth instead of the prototype browser-only sign-in. On the first sign-in, existing local tasks and chat history are uploaded to the new workspace row. Later changes are automatically synced, and signing in on another device loads the same workspace.
 
+Local migration is account-aware: browser data is imported only when the legacy local session email matches the newly authenticated Google email. A different Google account starts with an empty workspace instead of inheriting another account's browser data.
+
 After authentication, every user must choose a unique username. Usernames are normalized to lowercase, may contain 3–20 letters or numbers, and may optionally include underscores. Existing accounts without a profile are shown the username setup dialog before they can continue.
 
 ### Enable accountability groups
@@ -207,8 +209,10 @@ as $$ select exists (select 1 from public.group_members where group_id = target_
 create policy "Members can read groups" on public.groups for select using (public.is_group_member(id) or owner_id = auth.uid());
 create policy "Users can create groups" on public.groups for insert with check (owner_id = auth.uid());
 create policy "Owners can update groups" on public.groups for update using (owner_id = auth.uid());
+create policy "Owners can delete groups" on public.groups for delete using (owner_id = auth.uid());
 create policy "Members can read memberships" on public.group_members for select using (public.is_group_member(group_id) or user_id = auth.uid());
 create policy "Users can join groups" on public.group_members for insert with check (user_id = auth.uid());
+create policy "Members can leave or owners can kick" on public.group_members for delete using (user_id = auth.uid() or exists (select 1 from public.groups where id = group_id and owner_id = auth.uid()));
 create policy "Members can read tasks" on public.group_tasks for select using (public.is_group_member(group_id));
 create policy "Members can create tasks" on public.group_tasks for insert with check (public.is_group_member(group_id) and created_by = auth.uid());
 create policy "Members can read completions" on public.group_task_completions for select using (public.is_group_member((select group_id from public.group_tasks where id = task_id)));
