@@ -12,6 +12,7 @@ import {
   Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
   BarChart, Bar
 } from "recharts";
+import { supabase } from "./lib/supabase";
 
 const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
 const geminiModel = import.meta.env.VITE_GEMINI_MODEL || "gemini-3.8-flash";
@@ -38,6 +39,7 @@ const storageKey = "streakup-state-v3";
 const demoSessionKey = "streakup-demo-session-v1";
 const coachStorageKey = "streakup-coach-conversations-v1";
 const providerKeysStorageKey = "streakup-ai-provider-keys-v1";
+const usernamePattern = /^[a-z0-9_]{3,20}$/;
 const geminiRetryDelays = [1500, 3000, 6000];
 const maxAssistantCharacters = 5000;
 const visualRequestPattern = /\b(flowchart|flow chart|diagram|illustration|visual|mind map|concept map|architecture diagram|process map|infographic|image|picture|chart)\b/i;
@@ -46,6 +48,21 @@ const largeProjectPattern = /\b(app|application|website|web app|platform|backend
 const simpleProgramPattern = /\b(add|sum|subtract|minus|multiply|divide|average|hello world|print|even|odd|factorial|convert|calculate|calculator|two numbers|two values)\b/i;
 const fmtDate = (d = new Date()) => d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 const localDayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+const dayFromDate = (date, offset = 0) => { const next = new Date(date); next.setHours(12,0,0,0); next.setDate(next.getDate()+offset); return localDayKey(next); };
+const taskCreatedDay = task => {
+  if (task.createdAt) { const date = new Date(task.createdAt); if (!Number.isNaN(date.getTime())) return localDayKey(date); }
+  const timestamp = Number.parseInt(String(task.id || "").slice(0, 8), 36);
+  if (Number.isFinite(timestamp)) { const date = new Date(timestamp); if (!Number.isNaN(date.getTime()) && date.getFullYear() >= 2020) return localDayKey(date); }
+  return null;
+};
+const dueOffsets = { Today: 0, Tomorrow: 1, "This week": 7, Later: 30 };
+const normalizeTasks = tasks => (tasks || []).map(task => {
+  const createdDay = taskCreatedDay(task);
+  return { ...task, dueDate: task.dueDate && /^\d{4}-\d{2}-\d{2}$/.test(task.dueDate)
+    ? task.dueDate
+    : dayFromDate(createdDay ? new Date(`${createdDay}T12:00:00`) : new Date(), createdDay ? (dueOffsets[task.due] ?? 0) : 0) };
+});
+const isTaskOverdue = task => Boolean(!task.completed && task.dueDate && task.dueDate < localDayKey());
 const uid = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2,7)}`;
 const formatDuration = totalSeconds => {
   const seconds = Math.max(0, Math.floor(totalSeconds || 0));
@@ -62,7 +79,7 @@ function loadLocal() {
     const raw = localStorage.getItem(storageKey);
     if (!raw) return initialState;
     const saved = JSON.parse(raw);
-    return { ...initialState, ...saved, focusTimeSeconds: saved.focusTimeSeconds ?? (saved.focusMinutes || 0) * 60 };
+    return { ...initialState, ...saved, tasks: normalizeTasks(saved.tasks), focusTimeSeconds: saved.focusTimeSeconds ?? (saved.focusMinutes || 0) * 60 };
   } catch { return initialState; }
 }
 function loadDemoSession() {
@@ -523,9 +540,53 @@ export default function App() {
   const [providerKeyDraft, setProviderKeyDraft] = useState({ gemini: "", groq: "", openrouter: "", tavily: "", youtube: "" });
   const [showProviderSetup, setShowProviderSetup] = useState(false);
   const [accountForm, setAccountForm] = useState({ email: "", name: "" });
+  const [cloudReady, setCloudReady] = useState(!supabase);
+  const [username, setUsername] = useState("");
+  const [usernameDraft, setUsernameDraft] = useState("");
+  const [usernameError, setUsernameError] = useState("");
+  const [usernameSaving, setUsernameSaving] = useState(false);
 
-  useEffect(() => { localStorage.setItem(storageKey, JSON.stringify(data)); }, [data]);
+  useEffect(() => {
+    localStorage.setItem(storageKey, JSON.stringify(data));
+    if (!supabase || !user || !cloudReady) return;
+    const timer = setTimeout(async () => {
+      const { error } = await supabase.from("workspace_state").upsert({ user_id: user.id, state: { data, coachConversations, providerKeys }, updated_at: new Date().toISOString() });
+      if (error) console.error("Workspace sync failed.", error);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [data, coachConversations, providerKeys, user, cloudReady]);
   useEffect(() => { localStorage.setItem(coachStorageKey, JSON.stringify(coachConversations)); }, [coachConversations]);
+  useEffect(() => {
+    if (!supabase) return;
+    let active = true;
+    supabase.auth.getSession().then(async ({ data: { session }, error }) => {
+      if (error) { console.error("Supabase session could not be loaded.", error); setAuthLoading(false); return; }
+      if (!active) return;
+      setUser(session?.user || null);
+      if (session?.user) {
+        const { data: profile, error: profileError } = await supabase.from("profiles").select("username").eq("id", session.user.id).maybeSingle();
+        if (profileError) console.error("Profile could not be loaded.", profileError);
+        setUsername(profile?.username || "");
+        setUsernameDraft(profile?.username || "");
+        const { data: workspace, error: workspaceError } = await supabase.from("workspace_state").select("state").eq("user_id", session.user.id).maybeSingle();
+        if (workspaceError) console.error("Cloud workspace could not be loaded.", workspaceError);
+        if (workspace?.state) {
+          setData(current => ({ ...current, ...(workspace.state.data || {}), tasks: normalizeTasks(workspace.state.data?.tasks) }));
+          if (workspace.state.coachConversations?.length) setCoachConversations(workspace.state.coachConversations);
+          if (workspace.state.providerKeys) {
+            const keys = { gemini: "", groq: "", openrouter: "", tavily: "", youtube: "", ...workspace.state.providerKeys };
+            setProviderKeys(keys); setProviderKeyDraft(keys);
+          }
+        } else {
+          const { error: migrationError } = await supabase.from("workspace_state").insert({ user_id: session.user.id, state: { data: loadLocal(), coachConversations: loadCoachConversations(), providerKeys: loadProviderKeys(session.user.email) } });
+          if (migrationError) console.error("Local workspace migration failed.", migrationError);
+        }
+      }
+      setCloudReady(true); setAuthLoading(false);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => { if (active) setUser(session?.user || null); });
+    return () => { active = false; listener.subscription.unsubscribe(); };
+  }, []);
   useEffect(() => {
     if (!coachStreaming) return;
     const visibleText = coachStreaming.text.slice(0, coachStreaming.index);
@@ -558,21 +619,23 @@ export default function App() {
     if (page === "AI coach" && !providerKeys.gemini && !providerKeys.groq && !providerKeys.openrouter) setShowProviderSetup(true);
   }, [page, providerKeys]);
   const notify = (msg) => setToast(msg);
-  const todayTasks = data.tasks.filter(t => t.due === "Today");
+  const todayTasks = data.tasks.filter(t => t.dueDate === localDayKey() || t.due === "Today");
   const completedToday = todayTasks.filter(t => t.completed).length;
   const completion = todayTasks.length ? Math.round(completedToday / todayTasks.length * 100) : 0;
-  const displayName = user?.user_metadata?.full_name || user?.email?.split("@")[0] || "Alex Morgan";
+  const displayName = username || user?.user_metadata?.full_name || user?.email?.split("@")[0] || "Alex Morgan";
   const taskPoints = 10;
 
   useEffect(() => {
     if (user) setAccountForm({ email: user.email || "", name: user.user_metadata?.full_name || "" });
   }, [user]);
   useEffect(() => {
+    if (supabase) return;
     const keys = loadProviderKeys(user?.email);
     setProviderKeys(keys);
     setProviderKeyDraft(keys);
   }, [user]);
   useEffect(() => {
+    if (supabase) return;
     window.handleGoogleCredential = credentialResponse => {
       try {
         const payload = JSON.parse(window.atob(credentialResponse.credential.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
@@ -608,6 +671,7 @@ export default function App() {
     setData(d => {
       const old = d.tasks.find(t => t.id === id);
       if (!old) return d;
+      if (patch.completed === true && isTaskOverdue(old)) return d;
       const next = d.tasks.map(t => t.id === id ? { ...t, ...patch } : t);
       let xp = d.xp, completedTotal = d.completedTotal, consistency = d.consistency;
       if (patch.completed === true && !old.completed) { xp += taskPoints; completedTotal += 1; consistency = Math.min(100, consistency + 1); }
@@ -617,7 +681,7 @@ export default function App() {
     if (patch.completed === true) notify("+10 XP · Nice work. Keep the momentum.");
   }
   function addTask(task) {
-    setData(d => ({ ...d, tasks: [{ id: uid(), completed: false, minutes: 25, priority: "Medium", category: "Study", due: "Today", recurring: "None", ...task }, ...d.tasks] }));
+    setData(d => ({ ...d, tasks: [{ id: uid(), createdAt: new Date().toISOString(), completed: false, minutes: 25, priority: "Medium", category: "Study", due: "Today", dueDate: dayFromDate(new Date(), dueOffsets[task.due] ?? 0), recurring: "None", ...task }, ...d.tasks] }));
     setAddModal(null); notify("Task added to your plan.");
   }
   function addGoal(goal) {
@@ -732,19 +796,41 @@ export default function App() {
     notify("AI provider keys removed.");
   }
   async function signOut() {
-    localStorage.removeItem(demoSessionKey);
-    setUser(null); setProfileMenu(false); notify("Signed out.");
+    if (supabase) await supabase.auth.signOut();
+    else { localStorage.removeItem(demoSessionKey); setUser(null); }
+    setProfileMenu(false); notify("Signed out.");
   }
   function saveAccountName(name) {
     const nextName = name.trim();
     if (!nextName) return notify("Enter a display name.");
     const session = { ...user, user_metadata: { ...user.user_metadata, full_name: nextName } };
-    localStorage.setItem(demoSessionKey, JSON.stringify(session));
-    setUser(session);
+    if (!supabase) { localStorage.setItem(demoSessionKey, JSON.stringify(session)); setUser(session); }
     notify("Display name updated.");
+  }
+  async function saveUsername(event) {
+    event.preventDefault();
+    const nextUsername = usernameDraft.trim().replace(/^@+/, "").toLowerCase();
+    if (!usernamePattern.test(nextUsername)) return setUsernameError("Use 3–20 lowercase letters and numbers. Underscores are optional.");
+    if (!supabase || !user?.id) { setUsername(nextUsername); setUsernameDraft(nextUsername); setAuthModal(false); return; }
+    setUsernameSaving(true); setUsernameError("");
+    const { error } = await supabase.from("profiles").upsert({ id: user.id, username: nextUsername }, { onConflict: "id" });
+    setUsernameSaving(false);
+    if (error) {
+      if (error.code === "23505") setUsernameError("That username is already taken. Choose another.");
+      else if (error.code === "42P01" || error.code === "PGRST205") setUsernameError("Create the profiles table in Supabase first.");
+      else if (error.code === "42501") setUsernameError("Supabase blocked profile access. Check your RLS policies.");
+      else { console.error("Username could not be saved.", error); setUsernameError(`Username could not be saved: ${error.message}`); }
+      return;
+    }
+    setUsername(nextUsername); setUsernameDraft(nextUsername); setAuthModal(false); notify("Username saved.");
   }
   function deleteAccount() {
     if (!window.confirm("Delete your account and this browser's workspace? This cannot be undone.")) return;
+    if (supabase && user?.id) {
+      supabase.from("workspace_state").delete().eq("user_id", user.id);
+      supabase.from("profiles").delete().eq("id", user.id);
+      supabase.auth.signOut();
+    }
     localStorage.removeItem(demoSessionKey);
     localStorage.removeItem(storageKey);
     localStorage.removeItem(coachStorageKey);
@@ -903,7 +989,7 @@ User: ${q}`;
           <div className="eyebrow">GET STARTED</div>
           <h2>Continue with Google</h2>
           <p className="auth-card-copy">Use your Google account to securely access your StreakUp workspace.</p>
-          {googleClientId ? <div id="google-signin-button" className="google-signin-button"/> : <div className="demo-warning"><CircleHelp size={16}/> Add <code>VITE_GOOGLE_CLIENT_ID</code> to enable Google Sign-In.</div>}
+          {supabase ? <button type="button" className="primary-button full" onClick={() => supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo: new URL(import.meta.env.BASE_URL || "/", window.location.origin).toString() } })}>Continue with Google</button> : googleClientId ? <div id="google-signin-button" className="google-signin-button"/> : <div className="demo-warning"><CircleHelp size={16}/> Add <code>VITE_GOOGLE_CLIENT_ID</code> to enable Google Sign-In.</div>}
           <p className="auth-disclaimer">Your name and email come from Google. You can edit your display name in Account settings.</p>
         </section>
       </div>
@@ -943,13 +1029,14 @@ User: ${q}`;
         {page === "Focus room" && <FocusPage seconds={focusSeconds} setSeconds={setFocusSeconds} running={focusRunning} setRunning={setFocusRunning} started={focusStarted} setStarted={setFocusStarted} mode={focusMode} setMode={setFocusMode} task={focusTask} setTask={setFocusTask} tasks={data.tasks} onFinish={finishFocus} data={data} />}
         {page === "AI coach" && <CoachPage messages={coachMessages} input={coachInput} setInput={setCoachInput} onSend={sendCoach} onRegenerate={regenerateCoachResponse} data={data} conversations={coachConversations} currentId={activeCoachId} onSelect={id => setCurrentCoachId(id)} onNew={newCoachConversation} onDelete={deleteCoachConversation} onPin={toggleCoachPin} isTyping={Boolean(coachStreaming) || coachRequesting} hasApiKey={Boolean(providerKeys.gemini || providerKeys.groq || providerKeys.openrouter)} onOpenApiKeySetup={() => setShowProviderSetup(true)} onRemoveApiKey={removeProviderKeys} />}
         {page === "Analytics" && <AnalyticsPage data={data} />}
-        {page === "Accountability" && <AccountabilityPage data={data} setData={setData} onNotify={notify} />}
+        {page === "Accountability" && <AccountabilityPage data={data} setData={setData} onNotify={notify} user={user} username={username} />}
         {page === "Settings" && <SettingsPage data={data} setData={setData} onNotify={notify} user={user} accountForm={accountForm} setAccountForm={setAccountForm} onSaveName={saveAccountName} onSignOut={signOut} onDeleteAccount={deleteAccount} />}
       </div>
       <footer className="footer"><span>STREAKUP © {new Date().getFullYear()}</span><span>Progress over perfection <span className="footer-heart">♥</span></span></footer>
     </main>
     {addModal && <AddModal type={addModal} onClose={() => setAddModal(null)} onTask={addTask} onGoal={addGoal} onHabit={addHabit}/>}
     {showProviderSetup && <ProviderSetupModal keys={providerKeyDraft} setKeys={setProviderKeyDraft} onSave={saveProviderKeys} onClose={() => setShowProviderSetup(false)} />}
+    {user && !username && <Modal title="Create your username" onClose={() => {}}><form className="form-stack" onSubmit={saveUsername}><p className="auth-card-copy">Choose a unique username for your StreakUp account.</p><label>Username<input value={usernameDraft ? `@${usernameDraft.replace(/^@+/, "")}` : ""} onChange={event => { setUsernameDraft(event.target.value.replace(/^@+/, "").toLowerCase()); setUsernameError(""); }} placeholder="e.g. alexmorgan" autoFocus required /></label><small>3–20 characters: lowercase letters and numbers. Underscores are optional.</small>{usernameError && <div className="demo-warning">{usernameError}</div>}<button type="submit" className="primary-button full" disabled={usernameSaving}>{usernameSaving ? "Saving username…" : "Save username"}</button></form></Modal>}
     {authModal && <Modal title={user ? "Your account" : "Welcome to StreakUp"} onClose={() => setAuthModal(false)}>
       {user && <div className="auth-note"><ShieldCheck size={18}/> Signed in as <strong>{user.email}</strong></div>}
       {user ? <button type="button" className="primary-button full" onClick={() => setAuthModal(false)}>Done</button> : googleClientId ? <div id="google-signin-button" className="google-signin-button"/> : <div className="demo-warning"><CircleHelp size={16}/> Google Sign-In is not configured.</div>}
@@ -1009,7 +1096,10 @@ function Overview({ data, todayTasks, completedToday, completion, onPage, onAdd,
   </>;
 }
 function TaskRow({ task, onToggle }) {
-  return <div className={`task-row ${task.completed ? "completed" : ""}`}><button className={`task-check ${task.completed ? "checked" : ""}`} onClick={()=>onToggle(task.id,{completed:!task.completed})} aria-label={task.completed?"Mark incomplete":"Complete task"}>{task.completed && <Check size={14}/>}</button><div className="task-main"><strong>{task.title}</strong><div className="task-sub"><span className={`priority-dot ${task.priority.toLowerCase()}`}/>{task.category}<span className="task-dot-sep">·</span><Clock3 size={12}/>{task.minutes} min</div></div><Pill tone={task.priority === "High" ? "danger" : task.priority === "Medium" ? "warning" : "neutral"}>{task.priority}</Pill></div>;
+  const overdue = isTaskOverdue(task);
+  const dueLabel = overdue ? "Overdue" : task.dueDate === localDayKey() ? "Due today" : task.dueDate;
+  const canComplete = !overdue || task.completed;
+  return <div className={`task-row ${task.completed ? "completed" : ""}`}><button className={`task-check ${task.completed ? "checked" : ""}`} disabled={!canComplete} onClick={()=>onToggle(task.id,{completed:!task.completed})} aria-label={task.completed?"Mark incomplete":overdue?"Overdue task cannot be completed":"Complete task"}>{task.completed && <Check size={14}/>}</button><div className="task-main"><strong>{task.title}</strong><div className="task-sub"><span className={`priority-dot ${task.priority.toLowerCase()}`}/>{task.category}<span className="task-dot-sep">·</span><Clock3 size={12}/>{task.minutes} min{dueLabel && <><span className="task-dot-sep">·</span><span className={overdue ? "task-overdue" : ""}>{dueLabel}</span></>}</div></div><Pill tone={task.priority === "High" ? "danger" : task.priority === "Medium" ? "warning" : "neutral"}>{task.priority}</Pill></div>;
 }
 function EmptyState({ title, text }) { return <div className="empty-state"><div className="empty-icon"><ListTodo size={21}/></div><strong>{title}</strong><p>{text}</p></div>; }
 
@@ -1119,22 +1209,106 @@ function AnalyticsPage({ data }) {
   return <>
     <SectionTitle eyebrow="NOTICE YOUR PROGRESS" title="Analytics" description="Use your history to learn what works—not to judge yourself." action={<Pill tone="positive"><TrendingUp size={13}/> Personal growth</Pill>}/>
     <div className="stats-grid analytics-stats"><StatCard label="Completion rate" value={`${rate}%`} sub={`${done} of ${data.tasks.length} tasks`} icon={CheckCheck} tone="mint"/><StatCard label="Consistency score" value={`${data.consistency}/100`} sub="Current index" icon={Activity} tone="violet"/><StatCard label="Focus sessions" value={data.focusSessions} sub="Logged sessions" icon={Focus} tone="blue"/><StatCard label="Experience earned" value={data.xp} sub={`Level ${data.level}`} icon={Zap} tone="amber"/></div>
-    <div className="analytics-grid"><div className="card analytics-chart"><div className="card-heading"><div><div className="eyebrow">WEEKLY OVERVIEW</div><h3>Focus hours</h3></div><Pill>Last 7 days</Pill></div><div className="chart-wrap large"><ResponsiveContainer width="100%" height="100%"><BarChart data={chartData} margin={{top:10,right:4,left:-20,bottom:0}}><CartesianGrid stroke="#ffffff0b" vertical={false}/><XAxis dataKey="day" tick={{fill:"#77758b",fontSize:11}} axisLine={false} tickLine={false}/><YAxis tick={{fill:"#77758b",fontSize:11}} axisLine={false} tickLine={false}/><Tooltip cursor={{fill:"transparent"}} contentStyle={{background:"#171722",border:"1px solid #333144",borderRadius:12,color:"#fff"}}/><Bar dataKey="focus" fill="#9b80ff" radius={[5,5,0,0]} name="Focus hours"/></BarChart></ResponsiveContainer></div></div><div className="card completion-card"><div className="eyebrow">TASK BREAKDOWN</div><h3>How you're doing</h3><div className="completion-donut"><svg viewBox="0 0 160 160"><circle cx="80" cy="80" r="61" className="donut-track"/><circle cx="80" cy="80" r="61" className="donut-value" style={{strokeDasharray:`${rate*3.83} 383`}}/></svg><div><strong>{rate}%</strong><span>complete</span></div></div><div className="legend-row"><span><i className="legend-violet"/>Completed</span><strong>{done}</strong></div><div className="legend-row"><span><i className="legend-grey"/>Still to do</span><strong>{data.tasks.length-done}</strong></div></div></div>
+    <div className="analytics-grid analytics-grid-single"><div className="card completion-card"><div className="eyebrow">TASK BREAKDOWN</div><h3>How you're doing</h3><div className="completion-donut"><svg viewBox="0 0 160 160"><circle cx="80" cy="80" r="61" className="donut-track"/><circle cx="80" cy="80" r="61" className="donut-value" style={{strokeDasharray:`${rate*3.83} 383`}}/></svg><div><strong>{rate}%</strong><span>complete</span></div></div><div className="legend-row"><span><i className="legend-violet"/>Completed</span><strong>{done}</strong></div><div className="legend-row"><span><i className="legend-grey"/>Still to do</span><strong>{data.tasks.length-done}</strong></div></div></div>
     <div className="card analytics-note"><div className="note-icon"><ShieldCheck size={18}/></div><div><strong>Honest data, better decisions</strong><p>Some charts in this prototype use illustrative sample data. Your task completion and totals reflect the tasks currently saved in this browser. Connect a backend and log daily history before relying on long-term trend analysis.</p></div></div>
   </>;
 }
-function AccountabilityPage({ data, setData, onNotify }) {
-  const [circleName,setCircleName] = useState("");
-  const [challenge,setChallenge] = useState("");
-  function createCircle(e) { e.preventDefault(); if(!circleName.trim())return; setData(d=>({...d,circles:[...(d.circles||[]),{id:uid(),name:circleName,members:1,created:fmtDate()}]})); setCircleName(""); onNotify("Private circle created in this browser."); }
-  function createChallenge(e) { e.preventDefault(); if(!challenge.trim())return; setData(d=>({...d,challenges:[...(d.challenges||[]),{id:uid(),title:challenge,days:7,joined:true}]})); setChallenge(""); onNotify("7-day challenge added."); }
+function AccountabilityPage({ data, setData, onNotify, user, username }) {
+  const [groups, setGroups] = useState([]);
+  const [selectedGroup, setSelectedGroup] = useState(null);
+  const [members, setMembers] = useState([]);
+  const [sharedTasks, setSharedTasks] = useState([]);
+  const [messages, setMessages] = useState([]);
+  const [groupName, setGroupName] = useState("");
+  const [taskTitle, setTaskTitle] = useState("");
+  const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(Boolean(supabase));
+  const [error, setError] = useState("");
+
+  async function loadGroups() {
+    if (!supabase || !user?.id) return;
+    const { data: memberships, error: membershipError } = await supabase.from("group_members").select("group_id").eq("user_id", user.id);
+    if (membershipError) return setError(membershipError.message);
+    const ids = (memberships || []).map(item => item.group_id);
+    if (!ids.length) { setGroups([]); setLoading(false); return; }
+    const { data: rows, error: groupError } = await supabase.from("groups").select("*").in("id", ids).order("created_at", { ascending: false });
+    if (groupError) setError(groupError.message); else { setGroups(rows || []); setSelectedGroup(current => current || rows?.[0] || null); }
+    setLoading(false);
+  }
+  async function loadGroupContent(group) {
+    if (!supabase || !group) return;
+    const [{ data: memberRows }, { data: taskRows }, { data: chatRows }] = await Promise.all([
+      supabase.from("group_members").select("user_id, username").eq("group_id", group.id),
+      supabase.from("group_tasks").select("*, group_task_completions(user_id)").eq("group_id", group.id).order("created_at"),
+      supabase.from("group_messages").select("*").eq("group_id", group.id).order("created_at").limit(100)
+    ]);
+    setMembers(memberRows || []); setSharedTasks(taskRows || []); setMessages(chatRows || []);
+  }
+  useEffect(() => { loadGroups(); }, [user?.id]);
+  useEffect(() => {
+    if (!selectedGroup) return;
+    loadGroupContent(selectedGroup);
+    if (!supabase) return;
+    const channel = supabase.channel(`group-${selectedGroup.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "group_tasks", filter: `group_id=eq.${selectedGroup.id}` }, () => loadGroupContent(selectedGroup))
+      .on("postgres_changes", { event: "*", schema: "public", table: "group_messages", filter: `group_id=eq.${selectedGroup.id}` }, payload => { if (payload.eventType === "INSERT") setMessages(current => [...current, payload.new]); })
+      .on("postgres_changes", { event: "*", schema: "public", table: "group_members", filter: `group_id=eq.${selectedGroup.id}` }, () => loadGroupContent(selectedGroup))
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [selectedGroup?.id]);
+  async function createGroup(event) {
+    event.preventDefault();
+    if (!supabase || !groupName.trim()) return;
+    const inviteToken = crypto.randomUUID();
+    const { data: group, error: groupError } = await supabase.from("groups").insert({ name: groupName.trim(), owner_id: user.id, invite_token: inviteToken }).select().single();
+    if (groupError) return setError(groupError.message);
+    const { error: memberError } = await supabase.from("group_members").insert({ group_id: group.id, user_id: user.id, username });
+    if (memberError) return setError(memberError.message);
+    setGroupName(""); await loadGroups(); setSelectedGroup(group); onNotify("Group created.");
+  }
+  async function joinFromLink() {
+    const token = new URLSearchParams(window.location.search).get("invite");
+    if (!supabase || !token || !user?.id) return;
+    const { data: group, error: joinError } = await supabase.rpc("join_group_by_invite", { target_token: token, target_username: username });
+    if (joinError || !group) setError(joinError?.message || "This invite link is invalid or expired.");
+    else { window.history.replaceState({}, "", window.location.pathname); await loadGroups(); setSelectedGroup(group); onNotify(`Joined ${group.name}.`); }
+  }
+  useEffect(() => { if (username) joinFromLink(); }, [username]);
+  async function addSharedTask(event) {
+    event.preventDefault();
+    if (!taskTitle.trim() || !selectedGroup) return;
+    const { error: taskError } = await supabase.from("group_tasks").insert({ group_id: selectedGroup.id, title: taskTitle.trim(), created_by: user.id, xp: 10 });
+    if (taskError) setError(taskError.message); else { setTaskTitle(""); onNotify("Shared task added."); }
+  }
+  async function toggleSharedTask(task) {
+    const complete = task.group_task_completions?.some(item => item.user_id === user.id);
+    if (complete) return;
+    const { error: completionError } = await supabase.from("group_task_completions").insert({ task_id: task.id, user_id: user.id });
+    if (completionError) return setError(completionError.message);
+    setData(current => ({ ...current, xp: current.xp + task.xp }));
+    onNotify(`+${task.xp} XP · Shared task completed.`);
+    loadGroupContent(selectedGroup);
+  }
+  async function sendMessage(event) {
+    event.preventDefault();
+    if (!message.trim() || !selectedGroup) return;
+    const { error: messageError } = await supabase.from("group_messages").insert({ group_id: selectedGroup.id, user_id: user.id, username, body: message.trim() });
+    if (messageError) setError(messageError.message); else setMessage("");
+  }
+  const inviteLink = selectedGroup ? `${window.location.origin}${window.location.pathname}?invite=${selectedGroup.invite_token}` : "";
+  if (!supabase) return <InfoAccountability text="Connect Supabase to use groups, invite links, shared tasks, and realtime chat." />;
   return <>
-    <SectionTitle eyebrow="BETTER TOGETHER" title="Accountability" description="Build supportive routines with people who want to grow alongside you."/>
-    <div className="social-hero"><div className="social-hero-art"><div className="social-orbit orbit-a"/><div className="social-orbit orbit-b"/><div className="social-center"><Users size={30}/></div><div className="social-dot dot-a">A</div><div className="social-dot dot-b">J</div><div className="social-dot dot-c">M</div></div><div><Pill tone="purple">PRIVATE BY DEFAULT</Pill><h2>Consistency is easier<br/>when we're <em>in it together.</em></h2><p>Create a small circle, agree on a shared goal and celebrate progress. Your personal tasks stay private unless you choose to share them.</p></div></div>
-    <div className="social-grid"><div className="card social-card"><div className="social-card-icon"><Users size={19}/></div><h3>Accountability circles</h3><p>Create a private group for classmates, friends or a study team.</p><form className="inline-create" onSubmit={createCircle}><input value={circleName} onChange={e=>setCircleName(e.target.value)} placeholder="e.g. Semester study crew"/><button className="primary-button" aria-label="Create circle"><Plus size={16}/></button></form>{(data.circles||[]).map(c=><div className="created-row" key={c.id}><div className="created-avatar">{c.name.slice(0,1).toUpperCase()}</div><div><strong>{c.name}</strong><span>{c.members} member · Created {c.created}</span></div><Pill>Private</Pill></div>)}</div><div className="card social-card"><div className="social-card-icon amber"><Trophy size={19}/></div><h3>Weekly challenges</h3><p>Choose a small, measurable challenge and build momentum together.</p><form className="inline-create" onSubmit={createChallenge}><input value={challenge} onChange={e=>setChallenge(e.target.value)} placeholder="e.g. 30 minutes of study daily"/><button className="primary-button" aria-label="Create challenge"><Plus size={16}/></button></form>{(data.challenges||[]).map(c=><div className="challenge-row" key={c.id}><div className="challenge-medal"><Flame size={17}/></div><div><strong>{c.title}</strong><span>{c.days}-day challenge · You're in</span></div><Pill tone="positive">Joined</Pill></div>)}</div></div>
-    <div className="info-banner"><ShieldCheck size={18}/><div><strong>Social features are local prototype data</strong><p>Shared groups, real friend invitations, leaderboards and cross-user challenge tracking require a backend and server-side permissions.</p></div></div>
+    <SectionTitle eyebrow="BETTER TOGETHER" title="Accountability" description="Create a group, invite people and complete shared tasks together."/>
+    {error && <div className="demo-warning">{error}</div>}
+    <div className="social-grid">
+      <div className="card social-card"><div className="social-card-icon"><Users size={19}/></div><h3>Create a group</h3><p>Invite friends or classmates with a private link.</p><form className="inline-create" onSubmit={createGroup}><input value={groupName} onChange={event => setGroupName(event.target.value)} placeholder="e.g. Semester study crew"/><button className="primary-button" aria-label="Create group"><Plus size={16}/></button></form>{loading ? <p>Loading groups…</p> : groups.map(group => <button className={`created-row ${selectedGroup?.id === group.id ? "selected" : ""}`} key={group.id} onClick={() => setSelectedGroup(group)}><div className="created-avatar">{group.name.slice(0,1).toUpperCase()}</div><div><strong>{group.name}</strong><span>Select group</span></div><Pill>Private</Pill></button>)}</div>
+      {selectedGroup ? <div className="card social-card"><div className="social-card-icon amber"><Users size={19}/></div><h3>{selectedGroup.name}</h3><p>{members.length} member{members.length === 1 ? "" : "s"} · Share this invite link</p><div className="inline-create"><input value={inviteLink} readOnly/><button type="button" className="primary-button" onClick={() => { navigator.clipboard.writeText(inviteLink); onNotify("Invite link copied."); }}><Copy size={16}/></button></div><form className="inline-create" onSubmit={addSharedTask}><input value={taskTitle} onChange={event => setTaskTitle(event.target.value)} placeholder="Add a task everyone must complete"/><button className="primary-button" aria-label="Add shared task"><Plus size={16}/></button></form>{sharedTasks.map(task => { const completed = task.group_task_completions?.some(item => item.user_id === user.id); return <div className="challenge-row" key={task.id}><div className="challenge-medal"><Check size={17}/></div><div><strong>{task.title}</strong><span>{task.group_task_completions?.length || 0}/{members.length} completed · {task.xp} XP each</span></div><button className="secondary-button small" disabled={completed} onClick={() => toggleSharedTask(task)}>{completed ? "Completed" : "Complete"}</button></div>; })}</div> : <div className="card social-card"><div className="social-card-icon amber"><Trophy size={19}/></div><h3>Join a group</h3><p>Open an invite link from a group owner to join it.</p></div>}
+    </div>
+    {selectedGroup && <div className="card social-card"><div className="social-card-icon"><Send size={19}/></div><h3>Group chat</h3><div className="chat-messages group-chat-messages">{messages.map(item => <div className="chat-message" key={item.id}><div className="chat-bubble"><strong>@{item.username}</strong><br/>{item.body}</div></div>)}</div><form className="chat-input-row" onSubmit={sendMessage}><input value={message} onChange={event => setMessage(event.target.value)} placeholder="Message your group…"/><button className="send-button"><Send size={17}/></button></form></div>}
+    <div className="info-banner"><ShieldCheck size={18}/><div><strong>Shared progress, private personal data</strong><p>Only group tasks and group chat are shared. Personal tasks stay private.</p></div></div>
   </>;
 }
+function InfoAccountability({ text }) { return <><SectionTitle eyebrow="BETTER TOGETHER" title="Accountability" description="Build supportive routines with people who want to grow alongside you."/><div className="info-banner"><ShieldCheck size={18}/><div><strong>Supabase is required</strong><p>{text}</p></div></div></>; }
 function SettingsPage({ data, setData, onNotify, user, accountForm, setAccountForm, onSaveName, onSignOut, onDeleteAccount }) {
   const [bugReport, setBugReport] = useState({ subject: "", description: "" });
   function change(key,value) { setData(d=>({...d,settings:{...d.settings,[key]:value}})); onNotify("Settings updated."); }
