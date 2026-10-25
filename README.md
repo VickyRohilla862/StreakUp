@@ -66,15 +66,21 @@ create table if not exists public.workspace_state (
 create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   username text not null unique,
+  avatar_url text,
+  public_profile boolean not null default true,
   created_at timestamptz not null default now()
 );
 
+alter table public.profiles add column if not exists avatar_url text;
+alter table public.profiles add column if not exists public_profile boolean not null default true;
+
 alter table public.profiles enable row level security;
 
+drop policy if exists "Public profiles are readable" on public.profiles;
 drop policy if exists "Users can read their profile" on public.profiles;
-create policy "Users can read their profile"
+create policy "Public profiles are readable"
 on public.profiles for select
-using (auth.uid() = id);
+using (public_profile = true or auth.uid() = id);
 
 drop policy if exists "Users can insert their profile" on public.profiles;
 create policy "Users can insert their profile"
@@ -248,6 +254,158 @@ alter table public.group_members replica identity full;
 ```
 
 In Supabase, open **Database → Replication** and enable realtime for `group_tasks`, `group_task_completions`, `group_messages`, and `group_members`. The Accountability page then supports group creation, invite links, shared tasks, per-user completion XP, and realtime chat.
+
+### Enable monthly leaderboard tournaments
+
+The complete rerunnable schema is also available in
+[supabase/schema.sql](./supabase/schema.sql). Use that file if you want to
+replace the separate setup sections below with one SQL script.
+
+If Supabase previously reported `column reference "tournament_number" is
+ambiguous`, use the latest `supabase/schema.sql`. The tournament generator now
+uses a uniquely named PL/pgSQL variable and explicitly qualifies the table
+column.
+
+Run this section after the profile SQL. It creates five five-day tournaments
+each month, starting on the 1st, 6th, 11th, 16th, and 21st. The last tournament
+ends at the start of the following month. The complete schema file also
+configures a Supabase `pg_cron` job to run daily at 12:00 AM Asia/Kolkata:
+it provisions the current month's tournaments and finalizes the previous month
+on the 1st. This requires the `pg_cron` extension to be available in the
+Supabase project.
+
+```sql
+alter table public.profiles add column if not exists avatar_url text;
+alter table public.profiles add column if not exists public_profile boolean not null default true;
+
+create table if not exists public.leaderboard_tournaments (
+  id uuid primary key default gen_random_uuid(),
+  season_month date not null,
+  tournament_number integer not null check (tournament_number between 1 and 5),
+  starts_at timestamptz not null,
+  ends_at timestamptz not null,
+  thresholds jsonb not null,
+  finalized boolean not null default false,
+  unique (season_month, tournament_number)
+);
+
+create table if not exists public.leaderboard_entries (
+  tournament_id uuid not null references public.leaderboard_tournaments(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  xp integer not null default 0 check (xp >= 0),
+  eligible boolean not null default false,
+  tier text check (tier in ('Silver', 'Platinum', 'Gold', 'Diamond')),
+  position integer,
+  finalized boolean not null default false,
+  entered_at timestamptz not null default now(),
+  primary key (tournament_id, user_id)
+);
+
+create table if not exists public.leaderboard_badges (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  tournament_id uuid not null references public.leaderboard_tournaments(id) on delete cascade,
+  tier text not null check (tier in ('Silver', 'Platinum', 'Gold', 'Diamond')),
+  name text not null,
+  awarded_at timestamptz not null default now(),
+  unique (user_id, tournament_id)
+);
+
+alter table public.leaderboard_tournaments enable row level security;
+alter table public.leaderboard_entries enable row level security;
+alter table public.leaderboard_badges enable row level security;
+
+drop policy if exists "Anyone can read tournaments" on public.leaderboard_tournaments;
+create policy "Anyone can read tournaments" on public.leaderboard_tournaments for select using (true);
+drop policy if exists "Anyone can read leaderboard entries" on public.leaderboard_entries;
+create policy "Anyone can read leaderboard entries" on public.leaderboard_entries for select using (true);
+drop policy if exists "Users can enter leaderboard" on public.leaderboard_entries;
+create policy "Users can enter leaderboard" on public.leaderboard_entries for insert with check (auth.uid() = user_id);
+drop policy if exists "Users can update their leaderboard entry" on public.leaderboard_entries;
+create policy "Users can update their leaderboard entry" on public.leaderboard_entries for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
+drop policy if exists "Anyone can read leaderboard badges" on public.leaderboard_badges;
+create policy "Anyone can read leaderboard badges" on public.leaderboard_badges for select using (true);
+
+create or replace function public.get_monthly_tournaments(target_month date)
+returns setof public.leaderboard_tournaments
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  start_day integer;
+  threshold jsonb;
+begin
+  for start_day in select unnest(array[1, 6, 11, 16, 21]) loop
+    threshold := case start_day
+      when 1 then '{"Diamond":100,"Gold":75,"Platinum":50,"Silver":10}'::jsonb
+      when 6 then '{"Diamond":200,"Gold":150,"Platinum":100,"Silver":50}'::jsonb
+      when 11 then '{"Diamond":300,"Gold":250,"Platinum":200,"Silver":150}'::jsonb
+      when 16 then '{"Diamond":400,"Gold":350,"Platinum":250,"Silver":200}'::jsonb
+      else '{"Diamond":500,"Gold":450,"Platinum":350,"Silver":300}'::jsonb
+    end;
+    insert into public.leaderboard_tournaments (season_month, tournament_number, starts_at, ends_at, thresholds)
+    values (
+      date_trunc('month', target_month)::date,
+      (array_position(array[1, 6, 11, 16, 21], start_day)),
+      date_trunc('month', target_month) + (start_day - 1) * interval '1 day',
+      date_trunc('month', target_month) + (start_day - 1) * interval '1 day' + interval '5 days',
+      threshold
+    )
+    on conflict (season_month, tournament_number) do update set thresholds = excluded.thresholds;
+  end loop;
+  return query select * from public.leaderboard_tournaments where season_month = date_trunc('month', target_month)::date order by tournament_number;
+end;
+$$;
+grant execute on function public.get_monthly_tournaments(date) to anon, authenticated;
+
+insert into storage.buckets (id, name, public)
+values ('avatars', 'avatars', true)
+on conflict (id) do update set public = true;
+drop policy if exists "Public avatar images are readable" on storage.objects;
+create policy "Public avatar images are readable" on storage.objects for select using (bucket_id = 'avatars');
+drop policy if exists "Users can upload their avatar" on storage.objects;
+create policy "Users can upload their avatar" on storage.objects for insert with check (bucket_id = 'avatars' and (storage.foldername(name))[1] = auth.uid()::text);
+drop policy if exists "Users can update their avatar" on storage.objects;
+create policy "Users can update their avatar" on storage.objects for update using (bucket_id = 'avatars' and (storage.foldername(name))[1] = auth.uid()::text);
+
+-- Run this function once after the fifth tournament each month from a trusted
+-- scheduled job. It finalizes positions, awards badges, and resets each
+-- participant's workspace XP to the sum of their earned tier rewards.
+create or replace function public.finalize_monthly_leaderboard(target_month date)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  tournament_row record;
+  entry_row record;
+  reward_total integer;
+  reward integer;
+  month_label text := to_char(target_month, 'FMMonth YYYY');
+begin
+  for tournament_row in select * from public.leaderboard_tournaments where season_month = date_trunc('month', target_month)::date order by tournament_number loop
+    for entry_row in
+      select user_id, tier, row_number() over (order by xp desc, entered_at asc) as final_position
+      from public.leaderboard_entries
+      where tournament_id = tournament_row.id and eligible = true
+    loop
+      reward := case entry_row.tier when 'Diamond' then 1000 when 'Gold' then 750 when 'Platinum' then 500 when 'Silver' then 250 else 0 end;
+      update public.leaderboard_entries set position = entry_row.final_position, finalized = true where tournament_id = tournament_row.id and user_id = entry_row.user_id;
+      insert into public.leaderboard_badges (user_id, tournament_id, tier, name)
+      values (entry_row.user_id, tournament_row.id, entry_row.tier, entry_row.tier || ' ' || month_label)
+      on conflict (user_id, tournament_id) do update set tier = excluded.tier, name = excluded.name;
+    end loop;
+    update public.leaderboard_tournaments set finalized = true where id = tournament_row.id;
+  end loop;
+  for entry_row in select user_id from public.leaderboard_entries where eligible = true and tournament_id in (select id from public.leaderboard_tournaments where season_month = date_trunc('month', target_month)::date) group by user_id loop
+    select coalesce(sum(case b.tier when 'Diamond' then 1000 when 'Gold' then 750 when 'Platinum' then 500 when 'Silver' then 250 else 0 end), 0) into reward_total from public.leaderboard_badges b where b.user_id = entry_row.user_id and b.tournament_id in (select id from public.leaderboard_tournaments where season_month = date_trunc('month', target_month)::date);
+    update public.workspace_state set state = jsonb_set(coalesce(state, '{}'::jsonb), '{data,xp}', to_jsonb(reward_total), true), updated_at = now() where user_id = entry_row.user_id;
+  end loop;
+end;
+$$;
+```
 
 Never put a Supabase service-role key in `VITE_*` variables. The anon key is intended for the browser and is safe only when Row Level Security policies are enabled.
 

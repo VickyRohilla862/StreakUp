@@ -32,6 +32,7 @@ const nav = [
   { id: "Focus room", icon: Focus, label: "Focus room" },
   { id: "AI coach", icon: BrainCircuit, label: "AI coach", tag: "AI" },
   { id: "Analytics", icon: BarChart3, label: "Analytics" },
+  { id: "Leaderboard", icon: Trophy, label: "Leaderboard" },
   { id: "Accountability", icon: Users, label: "Accountability" },
 ];
 const chartData = [];
@@ -42,6 +43,20 @@ const providerKeysStorageKey = "streakup-ai-provider-keys-v1";
 const usernamePattern = /^[a-z0-9_]{3,20}$/;
 const geminiRetryDelays = [1500, 3000, 6000];
 const maxAssistantCharacters = 5000;
+const leaderboardTiers = [
+  { name: "Diamond", minXp: 1000, tone: "diamond", reward: 1000 },
+  { name: "Gold", minXp: 750, tone: "gold", reward: 750 },
+  { name: "Platinum", minXp: 500, tone: "platinum", reward: 500 },
+  { name: "Silver", minXp: 250, tone: "silver", reward: 250 }
+];
+const tournamentStarts = [1, 6, 11, 16, 21];
+const tournamentThresholds = [
+  { Diamond: 100, Gold: 75, Platinum: 50, Silver: 10 },
+  { Diamond: 200, Gold: 150, Platinum: 100, Silver: 50 },
+  { Diamond: 300, Gold: 250, Platinum: 200, Silver: 150 },
+  { Diamond: 400, Gold: 350, Platinum: 250, Silver: 200 },
+  { Diamond: 500, Gold: 450, Platinum: 350, Silver: 300 }
+];
 const visualRequestPattern = /\b(flowchart|flow chart|diagram|illustration|visual|mind map|concept map|architecture diagram|process map|infographic|image|picture|chart)\b/i;
 const codingRequestPattern = /\b(code|coding|program|script|function|写|python|javascript|java|html|css|sql|snippet|implement|write a)\b/i;
 const largeProjectPattern = /\b(app|application|website|web app|platform|backend|api|production|enterprise|full[- ]stack|multiple files|folder structure|scalable|architecture|database|authentication|deployment|team project)\b/i;
@@ -1022,6 +1037,9 @@ User: ${q}`;
     return <div className="auth-page"><div className="auth-loading"><div className="brand-mark"><Activity size={21} strokeWidth={2.5}/></div><span>Loading your workspace…</span></div></div>;
   }
 
+  const publicProfileUsername = new URLSearchParams(window.location.search).get("profile");
+  if (!user && publicProfileUsername && supabase) return <PublicProfilePage profileUsername={publicProfileUsername} />;
+
   if (!user) {
     return <div className="auth-page">
       <div className="auth-brand"><div className="brand-mark"><Activity size={21} strokeWidth={2.5}/></div><div><div className="brand-name">streak<span>up</span></div><div className="brand-caption">YOUR CONSISTENCY OS</div></div></div>
@@ -1076,6 +1094,7 @@ User: ${q}`;
         {page === "Focus room" && <FocusPage seconds={focusSeconds} setSeconds={setFocusSeconds} running={focusRunning} setRunning={setFocusRunning} started={focusStarted} setStarted={setFocusStarted} mode={focusMode} setMode={setFocusMode} task={focusTask} setTask={setFocusTask} tasks={data.tasks} onFinish={finishFocus} data={data} />}
         {page === "AI coach" && <CoachPage messages={coachMessages} input={coachInput} setInput={setCoachInput} onSend={sendCoach} onRegenerate={regenerateCoachResponse} data={data} conversations={coachConversations} currentId={activeCoachId} onSelect={id => setCurrentCoachId(id)} onNew={newCoachConversation} onDelete={deleteCoachConversation} onPin={toggleCoachPin} isTyping={Boolean(coachStreaming) || coachRequesting} hasApiKey={Boolean(providerKeys.gemini || providerKeys.groq || providerKeys.openrouter)} onOpenApiKeySetup={() => setShowProviderSetup(true)} onRemoveApiKey={removeProviderKeys} />}
         {page === "Analytics" && <AnalyticsPage data={data} />}
+        {page === "Leaderboard" && <LeaderboardPage data={data} onNotify={notify} user={user} username={username} />}
         {page === "Accountability" && <AccountabilityPage data={data} setData={setData} onNotify={notify} user={user} username={username} />}
         {page === "Settings" && <SettingsPage data={data} setData={setData} onNotify={notify} user={user} accountForm={accountForm} setAccountForm={setAccountForm} onSaveName={saveAccountName} onSignOut={signOut} onDeleteAccount={deleteAccount} />}
       </div>
@@ -1259,6 +1278,116 @@ function AnalyticsPage({ data }) {
     <div className="analytics-grid analytics-grid-single"><div className="card completion-card"><div className="eyebrow">TASK BREAKDOWN</div><h3>How you're doing</h3><div className="completion-donut"><svg viewBox="0 0 160 160"><circle cx="80" cy="80" r="61" className="donut-track"/><circle cx="80" cy="80" r="61" className="donut-value" style={{strokeDasharray:`${rate*3.83} 383`}}/></svg><div><strong>{rate}%</strong><span>complete</span></div></div><div className="legend-row"><span><i className="legend-violet"/>Completed</span><strong>{done}</strong></div><div className="legend-row"><span><i className="legend-grey"/>Still to do</span><strong>{data.tasks.length-done}</strong></div></div></div>
     <div className="card analytics-note"><div className="note-icon"><ShieldCheck size={18}/></div><div><strong>Honest data, better decisions</strong><p>Some charts in this prototype use illustrative sample data. Your task completion and totals reflect the tasks currently saved in this browser. Connect a backend and log daily history before relying on long-term trend analysis.</p></div></div>
   </>;
+}
+function LeaderboardPage({ data, onNotify, user, username }) {
+  const [tournaments, setTournaments] = useState([]);
+  const [selectedTournament, setSelectedTournament] = useState(null);
+  const [entries, setEntries] = useState([]);
+  const [profiles, setProfiles] = useState({});
+  const [badges, setBadges] = useState([]);
+  const [profileBadges, setProfileBadges] = useState([]);
+  const [profile, setProfile] = useState(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(Boolean(supabase));
+  const now = new Date();
+  const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+
+  const tierForXp = (xp, number) => {
+    const thresholds = tournamentThresholds[number - 1] || tournamentThresholds[0];
+    return ["Diamond", "Gold", "Platinum", "Silver"].find(tier => xp >= thresholds[tier]) || null;
+  };
+  const loadTournaments = async () => {
+    if (!supabase) return;
+    setLoading(true);
+    const { data: rows, error: tournamentError } = await supabase.rpc("get_monthly_tournaments", { target_month: monthStart });
+    if (tournamentError) setError(tournamentError.message);
+    else {
+      setTournaments(rows || []);
+      setSelectedTournament(current => current || rows?.find(row => new Date(row.starts_at) <= now && new Date(row.ends_at) >= now) || rows?.[0] || null);
+    }
+    setLoading(false);
+  };
+  const loadEntries = async tournament => {
+    if (!supabase || !tournament) return;
+    const { data: rows, error: entryError } = await supabase.from("leaderboard_entries").select("user_id,xp,eligible,tier,position,finalized").eq("tournament_id", tournament.id).order("xp", { ascending: false });
+    if (entryError) { setError(entryError.message); return; }
+    setEntries(rows || []);
+    const ids = [...new Set((rows || []).map(row => row.user_id))];
+    if (ids.length) {
+      const { data: publicProfiles, error: profileError } = await supabase.from("profiles").select("id,username,avatar_url,public_profile").in("id", ids).eq("public_profile", true);
+      if (profileError) setError(profileError.message);
+      else setProfiles(Object.fromEntries((publicProfiles || []).map(item => [item.id, item])));
+    } else setProfiles({});
+    const { data: userBadges } = await supabase.from("leaderboard_badges").select("*").eq("user_id", user.id).order("awarded_at", { ascending: false });
+    setBadges(userBadges || []);
+  };
+  useEffect(() => { loadTournaments(); }, [user?.id, monthStart]);
+  useEffect(() => { loadEntries(selectedTournament); }, [selectedTournament?.id]);
+  useEffect(() => {
+    async function openProfile(publicProfile) {
+      setProfile(publicProfile);
+      const { data: rows } = await supabase.from("leaderboard_badges").select("*").eq("user_id", publicProfile.id).order("awarded_at", { ascending: false });
+      setProfileBadges(rows || []);
+    }
+    const ownEntry = entries.find(entry => entry.user_id === user.id);
+    if (!ownEntry || !selectedTournament || ownEntry.finalized || ownEntry.xp === data.xp) return;
+    const tier = tierForXp(data.xp, selectedTournament.tournament_number);
+    supabase.rpc("sync_leaderboard_xp", { target_tournament: selectedTournament.id, current_xp: data.xp })
+      .then(({ error: updateError }) => { if (!updateError) loadEntries(selectedTournament); });
+  }, [data.xp, selectedTournament?.id, entries.length]);
+  async function enterTournament() {
+    if (!selectedTournament) return;
+    const threshold = tournamentThresholds[selectedTournament.tournament_number - 1].Silver;
+    if (data.xp < threshold) return onNotify(`Earn ${threshold - data.xp} more XP to enter this tournament.`);
+    const tier = tierForXp(data.xp, selectedTournament.tournament_number);
+    const { error: enterError } = await supabase.rpc("enter_leaderboard_tournament", {
+      target_tournament: selectedTournament.id,
+      current_xp: data.xp
+    });
+    if (enterError) setError(enterError.message);
+    else { await loadEntries(selectedTournament); onNotify("You entered the tournament."); }
+  }
+  async function uploadAvatar(event) {
+    const file = event.target.files?.[0];
+    if (!file || !supabase) return;
+    if (!file.type.startsWith("image/") || file.size > 2 * 1024 * 1024) return setError("Choose an image smaller than 2 MB.");
+    const path = `${user.id}/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "")}`;
+    const { error: uploadError } = await supabase.storage.from("avatars").upload(path, file, { upsert: true });
+    if (uploadError) return setError(uploadError.message);
+    const { data: publicUrl } = supabase.storage.from("avatars").getPublicUrl(path);
+    const { error: profileError } = await supabase.from("profiles").update({ avatar_url: publicUrl.publicUrl }).eq("id", user.id);
+    if (profileError) setError(profileError.message); else { setProfile(current => current ? { ...current, avatar_url: publicUrl.publicUrl } : current); onNotify("Profile picture updated."); }
+  }
+  const ownEntry = entries.find(entry => entry.user_id === user.id);
+  const threshold = selectedTournament ? tournamentThresholds[selectedTournament.tournament_number - 1].Silver : 0;
+  const monthLabel = now.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  if (!supabase) return <InfoAccountability text="Connect Supabase to use the public leaderboard." />;
+  return <>
+    <SectionTitle eyebrow="COMPETE WITH MOMENTUM" title="Leaderboard" description="Enter each monthly tournament, climb through the tiers and earn profile badges." action={<Pill tone="purple">{monthLabel}</Pill>} />
+    {error && <div className="demo-warning">{error}</div>}
+    <div className="leaderboard-tabs">{tournaments.map(tournament => <button key={tournament.id} className={`leaderboard-tab ${selectedTournament?.id === tournament.id ? "selected" : ""}`} onClick={() => setSelectedTournament(tournament)}><strong>Tournament {tournament.tournament_number}</strong><span>{fmtDate(new Date(tournament.starts_at))} – {fmtDate(new Date(tournament.ends_at))}</span></button>)}</div>
+    {loading ? <div className="card leaderboard-empty">Loading tournaments…</div> : selectedTournament && <div className="leaderboard-layout"><div className="card leaderboard-card"><div className="leaderboard-head"><div><div className="eyebrow">TOURNAMENT {selectedTournament.tournament_number}</div><h3>{selectedTournament.finalized ? "Final results" : "Live standings"}</h3><p>Minimum entry: {threshold} XP · Your XP: {data.xp}</p></div>{ownEntry ? <Pill tone={ownEntry.tier?.toLowerCase()}>{ownEntry.tier || "Eligible"}</Pill> : <button className="primary-button small" onClick={enterTournament}>{data.xp >= threshold ? "Enter tournament" : `Need ${Math.max(0, threshold - data.xp)} XP`}</button>}</div><div className="tier-key">{leaderboardTiers.map(tier => <div key={tier.name} className={`tier-chip ${tier.tone}`}><strong>{tier.name}</strong><span>+{tier.reward} XP</span></div>)}</div>{entries.length ? <div className="leaderboard-rows">{entries.map((entry, index) => { const publicProfile = profiles[entry.user_id]; return <button className={`leaderboard-row ${entry.user_id === user.id ? "current" : ""}`} key={entry.user_id} onClick={() => publicProfile && openProfile(publicProfile)}><span className="rank">{entry.position || index + 1}</span><span className="avatar leaderboard-avatar">{publicProfile?.avatar_url ? <img src={publicProfile.avatar_url} alt="" /> : (publicProfile?.username || "U").slice(0, 1).toUpperCase()}</span><span className="leaderboard-user"><strong>@{publicProfile?.username || "Private profile"}</strong><small>{entry.tier || "Eligible"}</small></span><strong className="leaderboard-xp">{entry.xp} XP</strong></button>; })}</div> : <div className="leaderboard-empty">No eligible users have entered this tournament yet.</div>}</div><div className="leaderboard-side"><div className="card leaderboard-card"><div className="eyebrow">YOUR TIERS</div><h3>Tier rewards</h3><p>Finish the season holding a tier to receive its XP reward and a badge.</p>{leaderboardTiers.map(tier => <div className={`tier-detail ${tier.tone}`} key={tier.name}><span><strong>{tier.name}</strong><small>Final badge reward</small></span><b>+{tier.reward} XP</b></div>)}</div><div className="card leaderboard-card"><div className="eyebrow">YOUR BADGES</div><h3>Profile showcase</h3>{badges.length ? badges.map(badge => <div className="badge-row" key={badge.id}><span className={`badge-medal ${badge.tier?.toLowerCase()}`}>★</span><span><strong>{badge.name}</strong><small>Earned from a completed monthly season</small></span></div>) : <p>No tournament badges yet. Complete the eligibility criteria and hold a tier through the final tournament.</p>}</div></div></div>}
+    {profile && <Modal title={`@${profile.username}`} onClose={() => setProfile(null)}><div className="public-profile"><div className="public-profile-avatar">{profile.avatar_url ? <img src={profile.avatar_url} alt="" /> : profile.username.slice(0, 1).toUpperCase()}</div><h3>@{profile.username}</h3><p>Public StreakUp profile</p>{profile.id === user.id && <label className="secondary-button upload-avatar">Upload profile picture<input type="file" accept="image/*" onChange={uploadAvatar} /></label>}<div className="profile-badges">{profileBadges.map(badge => <Pill key={badge.id} tone={badge.tier?.toLowerCase()}>{badge.name}</Pill>)}</div><button className="secondary-button small" onClick={() => { navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?profile=${profile.username}`); onNotify("Public profile link copied."); }}>Copy public profile link</button></div></Modal>}
+  </>;
+}
+function PublicProfilePage({ profileUsername }) {
+  const [profile, setProfile] = useState(null);
+  const [badges, setBadges] = useState([]);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (!supabase || !profileUsername) return;
+    supabase.from("profiles").select("id,username,avatar_url,public_profile").eq("username", profileUsername.toLowerCase()).eq("public_profile", true).maybeSingle()
+      .then(async ({ data, error: profileError }) => {
+        if (profileError) setError(profileError.message);
+        else if (!data) setError("This public profile could not be found.");
+        else {
+          setProfile(data);
+          const { data: badgeRows } = await supabase.from("leaderboard_badges").select("*").eq("user_id", data.id).order("awarded_at", { ascending: false });
+          setBadges(badgeRows || []);
+        }
+      });
+  }, [profileUsername]);
+  return <div className="auth-page"><div className="auth-brand"><div className="brand-mark"><Activity size={21} strokeWidth={2.5}/></div><div><div className="brand-name">streak<span>up</span></div><div className="brand-caption">PUBLIC PROFILE</div></div></div><div className="card public-profile public-profile-page">{error ? <div className="demo-warning">{error}</div> : profile ? <><div className="public-profile-avatar">{profile.avatar_url ? <img src={profile.avatar_url} alt="" /> : profile.username.slice(0, 1).toUpperCase()}</div><h2>@{profile.username}</h2><p>Public StreakUp profile</p><div className="profile-badges">{badges.map(badge => <Pill key={badge.id} tone={badge.tier?.toLowerCase()}>{badge.name}</Pill>)}</div></> : <p>Loading profile…</p>}</div></div>;
 }
 function AccountabilityPage({ data, setData, onNotify, user, username }) {
   const [groups, setGroups] = useState([]);
