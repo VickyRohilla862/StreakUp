@@ -10,7 +10,7 @@
 --   tier rewards and monthly badges
 --
 -- Run this whole file in Supabase SQL Editor.
--- =========================================================
+--  =========================================================
 
 create extension if not exists pgcrypto;
 
