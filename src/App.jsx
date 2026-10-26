@@ -911,18 +911,46 @@ export default function App() {
     }
     setUsername(nextUsername); setUsernameDraft(nextUsername); setAuthModal(false); notify("Username saved.");
   }
-  function deleteAccount() {
+  async function clearWorkspace() {
+    if (!window.confirm("Clear this workspace from this browser and Supabase? This cannot be undone.")) return;
+    if (supabase && user?.id) {
+      setCloudReady(false);
+      const { error } = await supabase.from("workspace_state").delete().eq("user_id", user.id);
+      if (error) {
+        setCloudReady(true);
+        console.error("Cloud workspace could not be cleared.", error);
+        return notify(`Workspace could not be cleared: ${error.message}`);
+      }
+    }
+    localStorage.removeItem(storageKey);
+    localStorage.removeItem(coachStorageKey);
+    if (user?.email) localStorage.removeItem(`${providerKeysStorageKey}:${user.email}`);
+    setData(initialState);
+    setCoachConversations([createCoachConversation()]);
+    setProviderKeys({ gemini: "", groq: "", openrouter: "", tavily: "", youtube: "" });
+    setProviderKeyDraft({ gemini: "", groq: "", openrouter: "", tavily: "", youtube: "" });
+    setCloudReady(true);
+    notify("Workspace cleared from this browser and Supabase.");
+  }
+  async function deleteAccount() {
     if (!window.confirm("Delete your account and this browser's workspace? This cannot be undone.")) return;
     if (supabase && user?.id) {
-      supabase.from("workspace_state").delete().eq("user_id", user.id);
-      supabase.from("profiles").delete().eq("id", user.id);
-      supabase.auth.signOut();
+      const { error } = await supabase.rpc("delete_my_account");
+      if (error) {
+        console.error("Cloud account could not be deleted.", error);
+        return notify(`Account could not be deleted: ${error.message}`);
+      }
+      await supabase.auth.signOut();
     }
     localStorage.removeItem(demoSessionKey);
     localStorage.removeItem(storageKey);
     localStorage.removeItem(coachStorageKey);
+    if (user?.email) localStorage.removeItem(`${providerKeysStorageKey}:${user.email}`);
     setUser(null);
     setData(initialState);
+    setCoachConversations([createCoachConversation()]);
+    setProviderKeys({ gemini: "", groq: "", openrouter: "", tavily: "", youtube: "" });
+    setProviderKeyDraft({ gemini: "", groq: "", openrouter: "", tavily: "", youtube: "" });
     setPage("Overview");
     notify("Your account and local workspace were deleted.");
   }
@@ -1121,7 +1149,7 @@ User: ${q}`;
         {page === "Analytics" && <AnalyticsPage data={data} />}
         {page === "Leaderboard" && <LeaderboardPage data={data} onNotify={notify} onAddNotification={addNotification} user={user} username={username} />}
         {page === "Accountability" && <AccountabilityPage data={data} setData={setData} onNotify={notify} user={user} username={username} />}
-        {page === "Settings" && <SettingsPage data={data} setData={setData} onNotify={notify} user={user} accountForm={accountForm} setAccountForm={setAccountForm} onSaveName={saveAccountName} onSignOut={signOut} onDeleteAccount={deleteAccount} />}
+        {page === "Settings" && <SettingsPage data={data} setData={setData} onNotify={notify} user={user} accountForm={accountForm} setAccountForm={setAccountForm} onSaveName={saveAccountName} onSignOut={signOut} onDeleteAccount={deleteAccount} onClearWorkspace={clearWorkspace} />}
       </div>
       <footer className="footer"><span>STREAKUP © {new Date().getFullYear()}</span><span>Progress over perfection <span className="footer-heart">♥</span></span></footer>
     </main>
@@ -1574,7 +1602,7 @@ function AccountabilityPage({ data, setData, onNotify, user, username }) {
   </>;
 }
 function InfoAccountability({ text }) { return <><SectionTitle eyebrow="BETTER TOGETHER" title="Accountability" description="Build supportive routines with people who want to grow alongside you."/><div className="info-banner"><ShieldCheck size={18}/><div><strong>Supabase is required</strong><p>{text}</p></div></div></>; }
-function SettingsPage({ data, setData, onNotify, user, accountForm, setAccountForm, onSaveName, onSignOut, onDeleteAccount }) {
+function SettingsPage({ data, setData, onNotify, user, accountForm, setAccountForm, onSaveName, onSignOut, onDeleteAccount, onClearWorkspace }) {
   const [bugReport, setBugReport] = useState({ subject: "", description: "" });
   function change(key,value) { setData(d=>({...d,settings:{...d.settings,[key]:value}})); onNotify("Settings updated."); }
   function reportProblem(event) {
@@ -1602,7 +1630,7 @@ function SettingsPage({ data, setData, onNotify, user, accountForm, setAccountFo
       <div className="card settings-card"><div className="settings-section-head"><IconBox tone="violet"><CircleUserRound size={18}/></IconBox><div><h3>Profile information</h3><p>Your email is managed by Google. Update your StreakUp display name here.</p></div></div><form className="form-stack" onSubmit={e=>{e.preventDefault();onSaveName(accountForm.name);}}><label>Display name<input value={accountForm.name} onChange={e=>setAccountForm({...accountForm,name:e.target.value})} required /></label><button className="primary-button">Save name</button></form><div className="settings-row"><div><strong>Google email</strong><span>{accountForm.email}</span></div><Pill tone="positive">Verified by Google</Pill></div></div>
       <div className="card settings-card"><div className="settings-section-head"><IconBox tone="blue"><ShieldCheck size={18}/></IconBox><div><h3>Account access</h3><p>End this session or permanently remove your local account.</p></div></div><div className="settings-row"><div><strong>Sign out</strong><span>Remove this browser session</span></div><button className="secondary-button" onClick={onSignOut}><LogOut size={15}/> Sign out</button></div><div className="settings-row danger-row"><div><strong>Delete account</strong><span>Delete your account and all workspace data from this browser</span></div><button className="danger-button" onClick={onDeleteAccount}>Delete account</button></div></div>
       <div className="card settings-card"><div className="settings-section-head"><IconBox tone="blue"><Bell size={18}/></IconBox><div><h3>Reminders</h3><p>Keep reminders helpful, not overwhelming.</p></div></div><div className="settings-row"><div><strong>In-app reminders</strong><span>Show gentle reminder messages</span></div><button className={`toggle ${data.settings.reminders?"on":""}`} onClick={()=>change("reminders",!data.settings.reminders)}><i/></button></div><div className="settings-row"><div><strong>Grace days</strong><span>Recovery days allowed per week</span></div><select value={data.settings.graceDays} onChange={e=>change("graceDays",Number(e.target.value))}><option value="0">0 days</option><option value="1">1 day</option><option value="2">2 days</option></select></div></div>
-      <div className="card settings-card"><div className="settings-section-head"><IconBox tone="amber"><Zap size={18}/></IconBox><div><h3>Experience & scoring</h3><p>Keep your system encouraging and transparent.</p></div></div><div className="settings-row"><div><strong>Current XP</strong><span>Earned through completed actions</span></div><strong>{data.xp} XP</strong></div><div className="settings-row"><div><strong>Consistency score</strong><span>Current score out of 100</span></div><strong>{data.consistency}/100</strong></div><button className="secondary-button" onClick={()=>{setData(initialState);onNotify("Workspace cleared.");}}>Clear workspace</button></div>
+      <div className="card settings-card"><div className="settings-section-head"><IconBox tone="amber"><Zap size={18}/></IconBox><div><h3>Experience & scoring</h3><p>Keep your system encouraging and transparent.</p></div></div><div className="settings-row"><div><strong>Current XP</strong><span>Earned through completed actions</span></div><strong>{data.xp} XP</strong></div><div className="settings-row"><div><strong>Consistency score</strong><span>Current score out of 100</span></div><strong>{data.consistency}/100</strong></div><button className="secondary-button" onClick={onClearWorkspace}>Clear workspace</button></div>
       <div className="card settings-card"><div className="settings-section-head"><IconBox tone="blue"><Mail size={18}/></IconBox><div><h3>Report a problem</h3><p>Found a bug? Send the details directly to the StreakUp support email.</p></div></div><form className="form-stack" onSubmit={reportProblem}><label>Subject<input value={bugReport.subject} onChange={e=>setBugReport(current=>({...current,subject:e.target.value}))} placeholder="e.g. Chat response is not displaying"/></label><label>What went wrong?<textarea value={bugReport.description} onChange={e=>setBugReport(current=>({...current,description:e.target.value}))} placeholder="Describe what you expected, what happened, and how to reproduce it." rows="5" required /></label><button className="primary-button" type="submit"><Mail size={15}/> Report problem by email</button></form></div>
     </div>
   </>;

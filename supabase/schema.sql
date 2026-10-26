@@ -80,6 +80,20 @@ create policy "Users can delete their profile"
 on public.profiles for delete
 using (auth.uid() = id);
 
+create or replace function public.delete_my_account()
+returns void
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+begin
+  delete from auth.users where id = auth.uid();
+end;
+$$;
+
+revoke all on function public.delete_my_account() from public;
+grant execute on function public.delete_my_account() to authenticated;
+
 -- =========================================================
 -- 3. Accountability groups
 -- =========================================================

@@ -119,6 +119,8 @@ with check (auth.uid() = user_id);
 
 If Supabase reports `relation "workspace_state" already exists`, that is expected. The workspace table is already set up; do not run its `create table` statement again. Run only the `profiles` table statement, `alter table public.profiles enable row level security`, and the four profile policies. The username field accepts an optional `@` and removes it before saving.
 
+Run the latest `supabase/schema.sql` (or create its `delete_my_account()` function) to enable complete account deletion. The function removes the authenticated user from `auth.users`; the database cascade then removes the user's workspace, profile, groups, leaderboard entries, badges, and related data.
+
 3. In Supabase, open **Authentication → Providers → Google**, enable Google, and add your Google OAuth client ID and secret. In Google Cloud Console, add this Supabase callback URL as an authorized redirect URI:
    - `https://your-project-ref.supabase.co/auth/v1/callback`
    Add these application URLs as authorized JavaScript origins:
