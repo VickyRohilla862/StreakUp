@@ -21,7 +21,7 @@ const openRouterModel = import.meta.env.VITE_OPENROUTER_MODEL || "openai/gpt-oss
 
 const initialState = {
   tasks: [], goals: [], habits: [],
-  xp: 0, consistency: 0, level: 1, completedTotal: 0, missed: 0,
+  xp: 0, consistency: 0, level: 1, notifications: [], completedTotal: 0, missed: 0,
   focusSessions: 0, focusMinutes: 0, focusTimeSeconds: 0, scoreEvents: [], history: {}, circles: [],
   challenges: [], settings: { reminders: true, theme: "dark", graceDays: 1, weekStarts: "Monday" }
 };
@@ -35,6 +35,9 @@ const nav = [
   { id: "Leaderboard", icon: Trophy, label: "Leaderboard" },
   { id: "Accountability", icon: Users, label: "Accountability" },
 ];
+const maxUserLevel = 200;
+const xpPerLevel = 500;
+const levelForXp = xp => Math.min(maxUserLevel, Math.floor(Math.max(0, xp || 0) / xpPerLevel) + 1);
 const chartData = [];
 const storageKey = "streakup-state-v3";
 const demoSessionKey = "streakup-demo-session-v1";
@@ -94,7 +97,7 @@ function loadLocal() {
     const raw = localStorage.getItem(storageKey);
     if (!raw) return initialState;
     const saved = JSON.parse(raw);
-    return { ...initialState, ...saved, tasks: normalizeTasks(saved.tasks), focusTimeSeconds: saved.focusTimeSeconds ?? (saved.focusMinutes || 0) * 60 };
+    return { ...initialState, ...saved, level: levelForXp(saved.xp), notifications: saved.notifications || [], tasks: normalizeTasks(saved.tasks), focusTimeSeconds: saved.focusTimeSeconds ?? (saved.focusMinutes || 0) * 60 };
   } catch { return initialState; }
 }
 function loadDemoSession() {
@@ -575,6 +578,21 @@ export default function App() {
   }, [data, coachConversations, providerKeys, user, cloudReady]);
   useEffect(() => { localStorage.setItem(coachStorageKey, JSON.stringify(coachConversations)); }, [coachConversations]);
   useEffect(() => {
+    const nextLevel = levelForXp(data.xp);
+    if (nextLevel <= (data.level || 1)) return;
+    setData(current => ({
+      ...current,
+      level: nextLevel,
+      notifications: [
+        ...(current.notifications || []),
+        ...Array.from({ length: nextLevel - (current.level || 1) }, (_, index) => {
+          const level = (current.level || 1) + index + 1;
+          return { id: `level-${level}`, message: `Congratulations! You reached Level ${level}.`, createdAt: new Date().toISOString() };
+        })
+      ]
+    }));
+  }, [data.xp, data.level]);
+  useEffect(() => {
     if (!supabase) return;
     let active = true;
     supabase.auth.getSession().then(async ({ data: { session }, error }) => {
@@ -681,6 +699,13 @@ export default function App() {
     if (page === "AI coach" && !providerKeys.gemini && !providerKeys.groq && !providerKeys.openrouter) setShowProviderSetup(true);
   }, [page, providerKeys]);
   const notify = (msg) => setToast(msg);
+  const addNotification = (message, id = uid()) => {
+    setData(current => ({
+      ...current,
+      notifications: [...(current.notifications || []), { id, message, createdAt: new Date().toISOString() }]
+    }));
+    setToast(message);
+  };
   const todayTasks = data.tasks.filter(t => t.dueDate === localDayKey() || t.due === "Today");
   const completedToday = todayTasks.filter(t => t.completed).length;
   const completion = todayTasks.length ? Math.round(completedToday / todayTasks.length * 100) : 0;
@@ -1085,7 +1110,7 @@ User: ${q}`;
     <main className="main-area">
       <header className="topbar">
         <div className="topbar-left"><button className="mobile-menu icon-button" onClick={() => setMobileNav(true)}><Menu size={20}/></button><div className="breadcrumb">Workspace <ChevronRight size={14}/> <strong>{page}</strong></div></div>
-        <div className="topbar-right"><div className="today-chip"><span className="live-dot"/>{new Date().toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"})}</div><button className="icon-button notification-button" title="Notifications" onClick={() => notify(data.settings.reminders ? "You're all caught up. Keep your next step small." : "Reminders are turned off in Settings.")}><Bell size={18}/><i/></button><button className="top-avatar" onClick={() => setAuthModal(true)}>{displayName.slice(0,1).toUpperCase()}</button></div>
+        <div className="topbar-right"><div className="today-chip"><span className="live-dot"/>{new Date().toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"})}</div><button className="icon-button notification-button" title="Notifications" onClick={() => notify(data.notifications?.at(-1)?.message || (data.settings.reminders ? "You're all caught up. Keep your next step small." : "Reminders are turned off in Settings."))}><Bell size={18}/><i/></button><button className="top-avatar" onClick={() => setAuthModal(true)}>{displayName.slice(0,1).toUpperCase()}</button></div>
       </header>
       <div className="page-content">
         {page === "Overview" && <Overview data={data} todayTasks={todayTasks} completedToday={completedToday} completion={completion} onPage={setPage} onAdd={() => setAddModal("task")} onSetStreak={setTodaysStreak} onToggle={updateTask} onNotify={notify} />}
@@ -1094,7 +1119,7 @@ User: ${q}`;
         {page === "Focus room" && <FocusPage seconds={focusSeconds} setSeconds={setFocusSeconds} running={focusRunning} setRunning={setFocusRunning} started={focusStarted} setStarted={setFocusStarted} mode={focusMode} setMode={setFocusMode} task={focusTask} setTask={setFocusTask} tasks={data.tasks} onFinish={finishFocus} data={data} />}
         {page === "AI coach" && <CoachPage messages={coachMessages} input={coachInput} setInput={setCoachInput} onSend={sendCoach} onRegenerate={regenerateCoachResponse} data={data} conversations={coachConversations} currentId={activeCoachId} onSelect={id => setCurrentCoachId(id)} onNew={newCoachConversation} onDelete={deleteCoachConversation} onPin={toggleCoachPin} isTyping={Boolean(coachStreaming) || coachRequesting} hasApiKey={Boolean(providerKeys.gemini || providerKeys.groq || providerKeys.openrouter)} onOpenApiKeySetup={() => setShowProviderSetup(true)} onRemoveApiKey={removeProviderKeys} />}
         {page === "Analytics" && <AnalyticsPage data={data} />}
-        {page === "Leaderboard" && <LeaderboardPage data={data} onNotify={notify} user={user} username={username} />}
+        {page === "Leaderboard" && <LeaderboardPage data={data} onNotify={notify} onAddNotification={addNotification} user={user} username={username} />}
         {page === "Accountability" && <AccountabilityPage data={data} setData={setData} onNotify={notify} user={user} username={username} />}
         {page === "Settings" && <SettingsPage data={data} setData={setData} onNotify={notify} user={user} accountForm={accountForm} setAccountForm={setAccountForm} onSaveName={saveAccountName} onSignOut={signOut} onDeleteAccount={deleteAccount} />}
       </div>
@@ -1141,7 +1166,7 @@ function Overview({ data, todayTasks, completedToday, completion, onPage, onAdd,
     </div>
     <div className="stats-grid">
       <StatCard label="Consistency score" value={`${data.consistency}%`} sub="Your reliability index" icon={Activity} tone="violet" trend={hasRecordedActivity ? <span className="stat-neutral">Tracking</span> : <span className="stat-neutral">No data yet</span>}/>
-      <StatCard label="Total experience" value={data.xp.toLocaleString()} sub={`Level ${data.level} · ${Math.max(0,500-(data.xp%500))} XP to next level`} icon={Zap} tone="amber"/>
+      <StatCard label="Total experience" value={data.xp.toLocaleString()} sub={`Level ${data.level} · ${data.level >= maxUserLevel ? "Maximum level reached" : `${xpPerLevel - (data.xp % xpPerLevel)} XP to next level`}`} icon={Zap} tone="amber"/>
       <StatCard label="Tasks completed" value={data.completedTotal} sub="Every small win counts" icon={CheckCheck} tone="mint"/>
       <StatCard label="Focus time" value={formatDuration(focusTimeSeconds)} sub={`${data.focusSessions} sessions logged`} icon={Clock3} tone="blue"/>
     </div>
@@ -1279,7 +1304,7 @@ function AnalyticsPage({ data }) {
     <div className="card analytics-note"><div className="note-icon"><ShieldCheck size={18}/></div><div><strong>Honest data, better decisions</strong><p>Some charts in this prototype use illustrative sample data. Your task completion and totals reflect the tasks currently saved in this browser. Connect a backend and log daily history before relying on long-term trend analysis.</p></div></div>
   </>;
 }
-function LeaderboardPage({ data, onNotify, user, username }) {
+function LeaderboardPage({ data, onNotify, onAddNotification, user, username }) {
   const [tournaments, setTournaments] = useState([]);
   const [selectedTournament, setSelectedTournament] = useState(null);
   const [entries, setEntries] = useState([]);
@@ -1330,6 +1355,13 @@ function LeaderboardPage({ data, onNotify, user, username }) {
       setProfileBadges(rows || []);
     }
     const ownEntry = entries.find(entry => entry.user_id === user.id);
+    if (selectedTournament?.tournament_number === 21 && selectedTournament.finalized && ownEntry?.finalized && onAddNotification) {
+      const reward = leaderboardTiers.find(tier => tier.name === ownEntry.tier)?.reward || 0;
+      const notificationId = `tournament-final-${selectedTournament.id}`;
+      if (!data.notifications?.some(notification => notification.id === notificationId)) {
+        onAddNotification(`Tournament 21 has ended. You finished in the ${ownEntry.tier || "no"} tier and gained ${reward} XP.`, notificationId);
+      }
+    }
     if (!ownEntry || !selectedTournament || ownEntry.finalized || ownEntry.xp === data.xp) return;
     const tier = tierForXp(data.xp, selectedTournament.tournament_number);
     supabase.rpc("sync_leaderboard_xp", { target_tournament: selectedTournament.id, current_xp: data.xp })
